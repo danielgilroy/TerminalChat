@@ -11,7 +11,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 
-#define MAX_CLIENTS 4
+#define MAX_CLIENTS 4 //Max FD limit on linux is set to 1024 by default
 
 void initializeServer();
 void *acceptNewClients(void *);
@@ -167,11 +167,14 @@ void *spamFilter(){
             current_interval = 0;
         }
 
+        //Reduce every client's timeout period by one until it's zero
+        pthread_mutex_lock(&spam_lock);
         for(int i = 0; i < MAX_CLIENTS; i++){
             if(spam_timeout[i] > 0){
                 spam_timeout[i]--;
             }
         }
+        pthread_mutex_unlock(&spam_lock);
         
     }
 
@@ -232,19 +235,19 @@ void processClients(){
                 if(client_message[0] == '/'){
                     //Process the server command
                     continue;
-                }else if(client_message[0] == '\r' && client_message[1] == '\n'){
-                    //Client message is empty so ignore the newline
+                }else if(client_message[0] == '\r' || client_message[0] == '\n' || client_message[0] == '\0'){
+                    //Client message is empty so ignore it
                     continue;
                 }else{
 
                     //Check spam_message_count to ensure client isn't spamming
                     pthread_mutex_lock(&spam_lock);
-                    if(spam_timeout[i] != 0){ //Client currently in timeout period
+                    if(spam_timeout[i] != 0){ //Client currently has timeout period
                         sprintf(spam_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
                         pthread_mutex_unlock(&spam_lock);
                         send(client_fds[i].fd, spam_message, strlen(spam_message) + 1, 0);
                         continue;
-                    }else if(spam_message_count[i] >= spam_message_limit){ //Put client in timeout period
+                    }else if(spam_message_count[i] >= spam_message_limit){ //Give client timeout period
                         spam_timeout[i] = spam_timeout_length;
                         pthread_mutex_unlock(&spam_lock);
                         sprintf(spam_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
@@ -264,9 +267,14 @@ void processClients(){
                     //printf("Received %d characters\n", recv_status);
                     /* ----------- */
 
-                    //Replace the ending \r\n with \0\0
-                    client_message[--recv_status] = '\0';
-                    client_message[recv_status-1] = '\0';
+                    //Replace ending \n with \0 or ending \r\n with \0\0
+                    if(client_message[recv_status-1] == '\n'){
+                        client_message[recv_status-1] = '\0';
+                        if(client_message[recv_status-2] == '\r'){
+                            client_message[recv_status-2] = '\0';
+                            recv_status--;
+                        }
+                    }                    
 
                     /* Include User Name */
                     char message[280];
