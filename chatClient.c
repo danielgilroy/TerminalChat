@@ -43,12 +43,16 @@ void initializeChat(){
 
     initscr();
     raw();
+    //noraw();
+    //cbreak();
+    //nocbreak(); 
+    keypad(stdscr, TRUE);
 
     chat_win = newwin(LINES-1, COLS, 0, 0);
 
     //Enable scrolling for chat window
-    idlok(chat_win, 1);
-    scrollok(chat_win, 1);
+    idlok(chat_win, TRUE);
+    scrollok(chat_win, TRUE);
 
     //Show prompt message
     mvwprintw(stdscr, LINES-1, 0, "Send> ");
@@ -113,15 +117,11 @@ void *incomingMessages(){
         /* ----------- */
 
         printToChat(server_message);
-        
     }
 
 }
 
 void outgoingMessages(){
-
-    //mvwprintw(stdscr, LINES-1, 0, "Send> ");
-    //wrefresh(stdscr);
 
     int status;
     char user_message[256];
@@ -135,7 +135,8 @@ void outgoingMessages(){
         //Move cursor to starting position and clear the line
         wmove(stdscr, LINES-1, 6);
         clrtoeol();
-
+        wrefresh(chat_win);
+        wrefresh(stdscr);
 
         if(user_message[0] == '\0'){
             //Message is blank so ignore it
@@ -159,10 +160,10 @@ void outgoingMessages(){
             message_length = strlen(user_message);
             
             //Append carriage return and line feed to match telnet standard
-            user_message[message_length++] = '\r';
-            user_message[message_length++] = '\n';
+            //user_message[message_length] = '\r';
+            //user_message[++message_length] = '\n';
 
-            status = sendMessage(user_message, message_length);
+            status = sendMessage(user_message, message_length + 1);
             if(status == -1){
                 perror("Error");
             }
@@ -198,13 +199,14 @@ void printTime(){
     cur_time = localtime(&raw_time);  
 
     //Print time to chat window at current cursor location
-    wprintw(chat_win, "%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
+    wprintw(chat_win, "%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);
+    wrefresh(chat_win); 
+    wrefresh(stdscr); 
 }
 
 static void handler(int signum){
 	pthread_exit(NULL);
 }
-
 
 
 
