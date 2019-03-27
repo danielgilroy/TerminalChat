@@ -29,7 +29,6 @@ int joinServer(char *response){
     //Perform the connection using the socket and address struct
     status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
     
-    
     //Check for error with the connection
     if(status){
         //fprintf(stderr, "There was an error making a connection to the remote socket\n\n");
@@ -53,7 +52,7 @@ int receiveMessage(char *message, int message_length){
     int status;
     status = recv(network_socket, message, message_length, 0);
 
-    if(status == 0) {
+    if(status <= 0) {
         closeSocket(network_socket);
     }
 

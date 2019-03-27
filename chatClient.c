@@ -70,9 +70,10 @@ void initializeConnection(){
     status = joinServer(response);
 
     if (status < 0){
-        wprintw(chat_win, " -There was an error connecting to the server-\n");
+        wprintw(chat_win, "\n -There was an error connecting to the server-\n");
         wprintw(chat_win, "    -The chat client will close shortly-\n");
         wrefresh(chat_win);
+        sleep(3);
         terminateChat();
     }
 
@@ -105,10 +106,17 @@ void *incomingMessages(){
 
         status = receiveMessage(server_message, sizeof(server_message));
     
-        if(status <= 0){
-            wprintw(chat_win, "\n    -The chat server has shutdown-\n");
+        if(status == 0){
+            wprintw(chat_win, "\n   -The connection to the server has been lost-\n");
+            wprintw(chat_win, "       -The chat client will close shortly-\n");
+            wrefresh(chat_win);
+            sleep(3);
+            terminateChatNow();  
+        }else if(status == -1){
+            wprintw(chat_win, "\n      -There was an error-\n");
             wprintw(chat_win, " -The chat client will close shortly-\n");
             wrefresh(chat_win);
+            sleep(3);
             terminateChatNow();  
         }
 
