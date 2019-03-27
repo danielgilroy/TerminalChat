@@ -143,33 +143,38 @@ void outgoingMessages(){
             continue;
         }else if(user_message[0] == '/'){
 
-            //Process local command or send command to server
+            //Process local commands
 
             //Local command - Clear chat window
             if(strcmp(user_message, "/clear") == 0){
                 werase(chat_win);
+                wrefresh(chat_win);
+                wrefresh(stdscr);
+                continue;
             }
 
-        }else{
 
-            /* Debug Local Print */
-            //wprintw(chat_win, "You: %s\n", user_message);
-            //wrefresh(chat_win); 
-            /* End Debug */
-
-            message_length = strlen(user_message);
-            
-            //Append carriage return and line feed to match telnet standard
-            //user_message[message_length] = '\r';
-            //user_message[++message_length] = '\n';
-
-            status = sendMessage(user_message, message_length + 1);
-            if(status == -1){
-                perror("Error");
-            }
+            //Or fall through to send commands to server
 
         }
 
+        /* Debug Local Print */
+        //wprintw(chat_win, "You: %s\n", user_message);
+        //wrefresh(chat_win); 
+        /* End Debug */
+
+        message_length = strlen(user_message);
+            
+        //Append carriage return and line feed to match telnet standard
+        //user_message[message_length] = '\r';
+        //user_message[++message_length] = '\n';
+
+        status = sendMessage(user_message, message_length + 1);
+        if(status == -1){
+            perror("Error");
+        }
+
+        
         //Refresh windows
         wrefresh(chat_win);
         wrefresh(stdscr);
