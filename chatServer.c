@@ -26,6 +26,8 @@ int client_count = 0;
 pthread_mutex_t lock;
 char waitingForMutex = 0;
 
+char userNames[MAX_CLIENTS][16];
+
 short spam_message_count[MAX_CLIENTS]; //Spam message counters for each client
 short spam_timeout[MAX_CLIENTS]; //Spam timeout for each client
 const short spam_message_limit = 10; //Max messages within spam check window
@@ -104,6 +106,7 @@ void *acceptNewClients(void *server){
     int index = 0;
     int server_socket = *((int *) server);
     char server_message[256];
+    char user_name[16];
 
     //Declare the client socket to connect to
     int client_socket;
@@ -126,6 +129,8 @@ void *acceptNewClients(void *server){
                 pthread_mutex_unlock(&lock);
                 waitingForMutex = 0;
                 //puts("-Mutex Unlocked: New Client-");
+                sprintf(user_name, "Client%d", client_fds[index].fd);
+                strcpy(userNames[index], user_name);
                 index = (index + 1) % MAX_CLIENTS;
                 break;
             } else {
@@ -133,7 +138,7 @@ void *acceptNewClients(void *server){
             }
         }
         
-        printf("**Client on socket %d has joined the server**\n", client_socket);
+        printf("**Client on socket %d joined the server**\n", client_socket);
         
         //Send the message to the client socket
         sprintf(server_message, "Server: Welcome to the server! You are using socket %d", client_socket);
@@ -218,10 +223,10 @@ void processClients(){
                 if(recv_status == 0){
 
                     //Print message to server terminal
-                    printf("**Client on socket %d has left the server**\n", client_fds[i].fd);
+                    printf("**%s on socket %d left the server**\n", userNames[i], client_fds[i].fd);
                     
                     //Print message to chat server
-                    sprintf(client_message, "Server: Client%d has left the server", client_fds[i].fd);
+                    sprintf(client_message, "Server: %s has left the server", userNames[i]);
                     sendMessageToAll(client_message, strlen(client_message) + 1);
                     
                     //Close the client socket
@@ -233,7 +238,22 @@ void processClients(){
                 }
 
                 if(client_message[0] == '/'){
-                    //Process the server command
+
+                    //Process server commands
+
+                    //Change client's username
+                    if(strncmp(client_message, "/nick ", 6) == 0){
+                        printf("**%s on socket %d changed username to ", userNames[i], client_fds[i].fd);
+                        sprintf(spam_message, "Server: %s has changed their name to ", userNames[i]);
+
+                        strncpy(userNames[i], client_message + 6, 15);
+                        userNames[i][15] = '\0'; //Null terminate username
+
+                        printf("%s**\n", userNames[i]);
+                        strcat(spam_message, userNames[i]);
+                        sendMessageToAll(spam_message, strlen(spam_message) + 1);
+                    }
+
                     continue;
                 }else if(client_message[0] == '\r' || client_message[0] == '\n' || client_message[0] == '\0'){
                     //Client message is empty so ignore it
@@ -278,7 +298,9 @@ void processClients(){
 
                     /* Include User Name */
                     char message[280];
-                    sprintf(message, "Client%d: ", client_fds[i].fd); 
+                    //sprintf(message, "Client%d: ", client_fds[i].fd); 
+                    strncpy(message, userNames[i], 16);
+                    strcat(message, ": ");
                     char username_length = strlen(message);
                     strcat(message, client_message);
                     /********************/
@@ -288,7 +310,7 @@ void processClients(){
                     printf("%s\n", message);
 
                     //Send message to all clients
-                    //Only send the number of bytes received from recv
+                    //Only send the number of bytes received from recv + username length
                     sendMessageToAll(message, recv_status + username_length);
                 
                 }
