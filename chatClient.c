@@ -161,9 +161,7 @@ void outgoingMessages(){
                 continue;
             }
 
-
             //Or fall through to send commands to server
-
         }
 
         /* Debug Local Print */
@@ -187,7 +185,7 @@ void outgoingMessages(){
         wrefresh(chat_win);
         wrefresh(stdscr);
 
-    }while(strcmp(user_message, "/exit"));
+    }while(strcmp(user_message, "/exit") && strcmp(user_message, "/quit"));
   
     wprintw(chat_win, "\n -Leaving chat server-\n");
     wrefresh(chat_win); 
@@ -223,23 +221,20 @@ static void handler(int signum){
 
 
 
-
 /* Debugging method */
 void *printMessage(){
 
     int i = 0;
 
-    sleep(2);
+    sleep(2); //Delay before starting to send messages
            
     while(1){
 
-        sleep(1);
+        sleep(1); //Delay between each message
         i++;
         wprintw(chat_win, "BobBot: For the #%d time, how are you?\n", i);
         wrefresh(chat_win);
         wrefresh(stdscr); //Ensures cursor in text window is show
 
     }
-
 }
-
