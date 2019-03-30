@@ -11,7 +11,8 @@
 #include <netinet/in.h>
 #include <poll.h>
 
-#define MAX_CLIENTS 1 //Max FD limit on linux is set to 1024 by default
+#define MAX_CLIENTS 4 //Max FD limit on linux is set to 1024 by default
+#define USERNAME_LENGTH 16
 
 void initializeServer();
 void *acceptNewClients(void *);
@@ -20,6 +21,7 @@ void processClients();
 int sendMessage(int, char *, int);
 int sendMessageToAll(char *, int);
 void printTime();
+int strCompare(const void *, const void *);
 void checkStatus(int);
 
 struct pollfd client_fds[MAX_CLIENTS];
@@ -29,7 +31,7 @@ pthread_mutex_t fd_lock;
 pthread_mutex_t cc_lock;
 
 
-char userNames[MAX_CLIENTS][16];
+char userNames[MAX_CLIENTS][USERNAME_LENGTH];
 
 short spam_message_count[MAX_CLIENTS]; //Spam message counters for each client
 short spam_timeout[MAX_CLIENTS]; //Spam timeout for each client
@@ -79,7 +81,7 @@ void initializeServer(){
     checkStatus(status);
 
     //Initialize client fds
-    for(int i = 0; i < MAX_CLIENTS; i++){
+    for(size_t i = 0; i < MAX_CLIENTS; i++){
         client_fds[i].fd = -1;
         client_fds[i].events = POLLIN;
     }
@@ -111,7 +113,7 @@ void *acceptNewClients(void *server){
     int index = 0;
     int server_socket = *((int *) server);
     char server_message[256];
-    char user_name[16];
+    char user_name[USERNAME_LENGTH];
 
     //Declare the client socket to connect to
     int client_socket;
@@ -121,7 +123,6 @@ void *acceptNewClients(void *server){
     while(1){
 
         //Accept a connection from a client
-        printf("Client count %d before accept\n", client_count);
         client_socket = accept(server_socket, NULL, NULL);
         checkStatus(client_socket);
         
@@ -129,8 +130,8 @@ void *acceptNewClients(void *server){
         pthread_mutex_lock(&cc_lock);
         if(client_count >= MAX_CLIENTS){
             pthread_mutex_unlock(&cc_lock);
-            printf("**Server has reached the maximum %d clients**\n", MAX_CLIENTS);
-            sprintf(server_message, "Server: The server has reached the maximum %d clients", MAX_CLIENTS);
+            printf("**Server has reached the maximum of %d clients**\n", MAX_CLIENTS);
+            sprintf(server_message, "Server: The server has reached the maximum of %d clients", MAX_CLIENTS);
             sendMessage(client_socket, server_message, strlen(server_message) + 1);
             status = close(client_socket);
             checkStatus(status);
@@ -155,7 +156,7 @@ void *acceptNewClients(void *server){
 
         //Give client a default username based on file descriptor
         sprintf(user_name, "Client%d", client_fds[index].fd);
-        strcpy(userNames[index], user_name);
+        strcpy(userNames[index], user_name); //Potenial thread issue without a mutex lock!!!
       
         //Print message to the server's terminal
         printf("**Client on socket %d joined the server**\n", client_socket);
@@ -192,7 +193,7 @@ void *spamFilter(){
 
         //Reduce every client's timeout period by one until it's zero
         pthread_mutex_lock(&spam_lock);
-        for(int i = 0; i < MAX_CLIENTS; i++){
+        for(size_t i = 0; i < MAX_CLIENTS; i++){
             if(spam_timeout[i] > 0){
                 spam_timeout[i]--;
             }
@@ -207,7 +208,7 @@ void processClients(){
     int status;
     int recv_status;
     char client_message[256];
-    char spam_message[256];
+    char server_message[256];
         
     while(1){
         
@@ -230,7 +231,7 @@ void processClients(){
         }
             
         //Event has occurred: Check all clients for events
-        for(int i = 0; i < MAX_CLIENTS; i++){
+        for(size_t i = 0; i < MAX_CLIENTS; i++){
 
             if(client_fds[i].revents & POLLIN){
 
@@ -241,18 +242,20 @@ void processClients(){
 
                     //Print message to server terminal
                     printf("**%s on socket %d left the server**\n", userNames[i], client_fds[i].fd);
-                    
+                
                     //Print message to chat server
                     sprintf(client_message, "Server: %s has left the server", userNames[i]);
                     sendMessageToAll(client_message, strlen(client_message) + 1);
                     
+                    //Remove username from array
+                    userNames[i][0] = '\0';
+
                     //Close the client socket
                     status = close(client_fds[i].fd);
                     checkStatus(status);
                     client_fds[i].fd = -1;
                     pthread_mutex_lock(&cc_lock);
                     client_count--;
-                    printf("Client count %d after leave\n", client_count);
                     pthread_mutex_unlock(&cc_lock);
                     continue;
                 }
@@ -263,15 +266,69 @@ void processClients(){
 
                     //Change client's username
                     if(strncmp(client_message, "/nick ", 6) == 0){
-                        printf("**%s on socket %d changed username to ", userNames[i], client_fds[i].fd);
-                        sprintf(spam_message, "Server: %s has changed their name to ", userNames[i]);
 
-                        strncpy(userNames[i], client_message + 6, 15);
-                        userNames[i][15] = '\0'; //Null terminate username
+                        char new_name[16];
+                        int duplicate_name = 0;
+                        
+                        strncpy(new_name, client_message + 6, 15);
+                        new_name[15] = '\0'; //Null terminate username
 
-                        printf("%s**\n", userNames[i]);
-                        strcat(spam_message, userNames[i]);
-                        sendMessageToAll(spam_message, strlen(spam_message) + 1);
+                        for(size_t j = 0; j < MAX_CLIENTS; j++){
+                           if(strcmp(new_name, userNames[j]) == 0){
+                               duplicate_name = 1;
+                               break;
+                           }
+                        }
+
+                        if(duplicate_name){
+                            sprintf(server_message, "Server: The name %s is already in use", new_name);
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;
+                        }
+                        
+                        printf("**%s on socket %d changed username to %s**\n", userNames[i], client_fds[i].fd, new_name);
+                        sprintf(server_message, "Server: %s has changed their name to %s", userNames[i], new_name);
+                        sendMessageToAll(server_message, strlen(server_message) + 1);
+                        strcpy(userNames[i], new_name);
+                    }
+
+
+                    //List who's connected to the chat server
+                    if(strncmp(client_message, "/who", 4) == 0){
+                        
+                        /*CHECK IF WE NEED TO REBUILD THE LIST*/
+
+                        char **sortedUsers = malloc(MAX_CLIENTS * sizeof(char *));
+                        if(sortedUsers == NULL){
+                            perror("Malloc");
+                            exit(0);
+                        } 
+                        for(size_t j = 0; j < MAX_CLIENTS; j++){
+                            sortedUsers[j] = malloc(USERNAME_LENGTH * sizeof(char));
+                            if(sortedUsers[j] == NULL){
+                                perror("Malloc");
+                                exit(0); 
+                            }
+                            strncpy(sortedUsers[j], userNames[j], USERNAME_LENGTH);
+                        }
+                        
+                        qsort(sortedUsers, MAX_CLIENTS, sizeof(char *), strCompare);
+                        sprintf(server_message, "Server: Current users are; %s", sortedUsers[0]);
+
+                        for(size_t j = 1; j < MAX_CLIENTS; j++){
+                            if(sortedUsers[j][0] == '\0'){
+                                break;
+                            } 
+                            strcat(server_message, ", ");
+                            strcat(server_message, sortedUsers[j]); 
+                        }
+
+                        for(size_t j = 0; j < MAX_CLIENTS; j++){
+                            free(sortedUsers[j]);
+                        }
+                        free(sortedUsers);
+
+                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1); 
                     }
 
                     continue;
@@ -283,15 +340,15 @@ void processClients(){
                     //Check spam_message_count to ensure client isn't spamming
                     pthread_mutex_lock(&spam_lock);
                     if(spam_timeout[i] != 0){ //Client currently has timeout period
-                        sprintf(spam_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
+                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
                         pthread_mutex_unlock(&spam_lock);
-                        sendMessage(client_fds[i].fd, spam_message, strlen(spam_message) + 1);
+                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                         continue;
                     }else if(spam_message_count[i] >= spam_message_limit){ //Give client timeout period
                         spam_timeout[i] = spam_timeout_length;
                         pthread_mutex_unlock(&spam_lock);
-                        sprintf(spam_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
-                        sendMessage(client_fds[i].fd, spam_message, strlen(spam_message) + 1);
+                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
+                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                         continue;
                     }
 
@@ -318,7 +375,7 @@ void processClients(){
 
                     /* Include User Name */
                     char message[280];
-                    strncpy(message, userNames[i], 16);
+                    strncpy(message, userNames[i], USERNAME_LENGTH);
                     strcat(message, ": ");
                     char username_length = strlen(message);
                     strcat(message, client_message);
@@ -332,10 +389,8 @@ void processClients(){
                     sendMessageToAll(message, recv_status + username_length);
                 
                 }
-
             }
         }
-
     }
 }
 
@@ -353,10 +408,10 @@ int sendMessageToAll(char *message, int message_length){
 
     int status;
 
-    for(int i = 0; i < MAX_CLIENTS; i++){
+    for(size_t i = 0; i < MAX_CLIENTS; i++){
 
         if(client_fds[i].fd <= 0){
-            continue;
+            continue; //Ignore invalid FDs
         }
 
         status = send(client_fds[i].fd, message, message_length, 0);
@@ -376,6 +431,15 @@ void printTime(){
 
     //Print time to terminal
     printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
+}
+
+int strCompare(const void *a, const void *b){
+    char *aa = *(char **) a;
+    char *bb = *(char **) b;
+    if(aa[0] == '\0' || bb[0] == '\0'){
+        return strncmp(bb, aa, USERNAME_LENGTH); //Put empty strings last
+    }
+    return strncmp(aa, bb, USERNAME_LENGTH);
 }
 
 void checkStatus(int status){
