@@ -26,7 +26,9 @@ void printTime();
 int strCompare(const void *, const void *);
 void checkStatus(int);
 void add_username(char *, int);
+void replace_username(char *, char *, int);
 struct table_entry *find_username(char *);
+void delete_username(struct table_entry *);
 
 struct pollfd client_fds[MAX_CLIENTS];
 int client_count = 0;
@@ -34,7 +36,7 @@ char waitingForMutex = 0;
 pthread_mutex_t fd_lock;
 pthread_mutex_t cc_lock;
 
-char userNames[MAX_CLIENTS][USERNAME_LENGTH];
+char usernames[MAX_CLIENTS][USERNAME_LENGTH];
 
 struct table_entry {
     char id[USERNAME_LENGTH];                    /* key */
@@ -42,7 +44,7 @@ struct table_entry {
     UT_hash_handle hh;         /* makes this structure hashable */
 };
 
-struct table_entry *user_name_to_fd = NULL; 
+struct table_entry *username_to_fd = NULL; 
 
 short spam_message_count[MAX_CLIENTS]; //Spam message counters for each client
 short spam_timeout[MAX_CLIENTS]; //Spam timeout for each client
@@ -167,7 +169,7 @@ void *acceptNewClients(void *server){
 
         //Give client a default username based on file descriptor
         sprintf(user_name, "Client%d", client_fds[index].fd);
-        strcpy(userNames[index], user_name); //Potenial thread issue without a mutex lock!!!
+        strcpy(usernames[index], user_name); //Potenial thread issue without a mutex lock!!!
         add_username(user_name, client_socket);
       
         //Print message to the server's terminal
@@ -257,14 +259,17 @@ void processClients(){
                     /* -------------------------- */
 
                     //Print message to server terminal
-                    printf("**%s on socket %d left the server**\n", userNames[i], client_fds[i].fd);
+                    printf("**%s on socket %d left the server**\n", usernames[i], client_fds[i].fd);
                 
                     //Print message to chat server
-                    sprintf(client_message, "Server: %s left the server", userNames[i]);
+                    sprintf(client_message, "Server: %s left the server", usernames[i]);
                     sendMessageToAll(client_message, strlen(client_message) + 1);
                     
+                    //Remove username from hash table
+                    delete_username(find_username(usernames[i]));
+                    
                     //Remove username from array
-                    userNames[i][0] = '\0';
+                    usernames[i][0] = '\0';
 
                     //Close the client socket
                     status = close(client_fds[i].fd);
@@ -298,7 +303,7 @@ void processClients(){
                                 perror("Malloc");
                                 exit(0); 
                             }
-                            strncpy(sortedUsers[j], userNames[j], USERNAME_LENGTH);
+                            strncpy(sortedUsers[j], usernames[j], USERNAME_LENGTH);
                         }
                         
                         qsort(sortedUsers, MAX_CLIENTS, sizeof(char *), strCompare);
@@ -323,30 +328,43 @@ void processClients(){
 
                     //Change client's username
                     if(strncmp(client_message, "/nick ", 6) == 0){
-
+                    
                         char new_name[16];
-                        int duplicate_name = 0;
-                        
-                        strncpy(new_name, client_message + 6, 15);
-                        new_name[15] = '\0'; //Null terminate username
 
-                        for(size_t j = 0; j < MAX_CLIENTS; j++){
-                           if(strcmp(new_name, userNames[j]) == 0){
-                               duplicate_name = 1;
-                               break;
-                           }
+                        //Get new name from client's message
+                        strncpy(new_name, client_message + 6, 16);
+
+                        //Check if new name is too long
+                        if(new_name[15] != '\0'){
+                            sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;
                         }
 
-                        if(duplicate_name){
+                        //Check if new name has any spaces
+                        if(strchr(new_name, ' ') != NULL){
+                            sprintf(server_message, "Server: Username must not contain spaces");
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;                            
+                        }
+
+                        //Check if new name is already in use
+                        struct table_entry *target_user = find_username(new_name);
+                        if(target_user != NULL){
                             sprintf(server_message, "Server: The name %s is already in use", new_name);
                             sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                             continue;
                         }
                         
-                        printf("**%s on socket %d changed username to %s**\n", userNames[i], client_fds[i].fd, new_name);
-                        sprintf(server_message, "Server: %s changed name to %s", userNames[i], new_name);
+                        //Send message to all clients informing them of name change
+                        printf("**%s on socket %d changed username to %s**\n", usernames[i], client_fds[i].fd, new_name);
+                        sprintf(server_message, "Server: %s changed name to %s", usernames[i], new_name);
                         sendMessageToAll(server_message, strlen(server_message) + 1);
-                        strcpy(userNames[i], new_name);
+
+                        //Change username in hash table and array
+                        replace_username(usernames[i], new_name, client_fds[i].fd);
+                        strcpy(usernames[i], new_name);
+
                         continue;
                     }
 
@@ -404,7 +422,7 @@ void processClients(){
                         int target_username_length = strcspn(client_message + 1, " ");
                         if(target_username_length > USERNAME_LENGTH - 1){
                             //Username is too long
-                            sprintf(server_message, "Server: The username entered is too long");
+                            sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
                             sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                             continue;
                         }
@@ -432,8 +450,8 @@ void processClients(){
                         }
 
                         //Add sender's username to message
-                        message = addUsernameToMessage(message, userNames[i]);
-                        size_t additional_length = strlen(userNames[i]) + 2; //Add two for ": "
+                        message = addUsernameToMessage(message, usernames[i]);
+                        size_t additional_length = strlen(usernames[i]) + 2; //Add two for ": "
 
                         //Send message to target user and sender
                         sendMessage(target_user->client_fd, message, recv_status + additional_length);
@@ -451,8 +469,8 @@ void processClients(){
                     /* ---------------------------------- */            
                     
                     //Add sender's username to message
-                    char *message = addUsernameToMessage(client_message, userNames[i]);      
-                    size_t additional_length = strlen(userNames[i]) + 2; //Add two for ": "        
+                    char *message = addUsernameToMessage(client_message, usernames[i]);      
+                    size_t additional_length = strlen(usernames[i]) + 2; //Add two for ": "        
 
                     //Print client's message to server console
                     printTime();
@@ -540,16 +558,26 @@ void checkStatus(int status){
     }
 }
 
-void add_username(char *username, int client_fd) {
+void add_username(char *username, int client_fd){
     struct table_entry *s;
     s = malloc(sizeof(struct table_entry));
     strcpy(s->id, username);
     s->client_fd = client_fd;
-    HASH_ADD_STR(user_name_to_fd, id, s);  /* id: name of key field */
+    HASH_ADD_STR(username_to_fd, id, s);  /* id: name of key field */
 }
 
-struct table_entry *find_username(char *username) {
+void replace_username(char *old_username, char *username, int client_fd){
+    delete_username(find_username(old_username));
+    add_username(username, client_fd);
+}
+
+struct table_entry *find_username(char *username){
     struct table_entry *s;
-    HASH_FIND_STR( user_name_to_fd, username, s );  /* s: output pointer */
+    HASH_FIND_STR(username_to_fd, username, s);  /* s: output pointer */
     return s;
+}
+
+void delete_username(struct table_entry *user) {
+    HASH_DEL(username_to_fd, user);  /* user: pointer to deletee */
+    free(user);             /* optional; it's up to you! */
 }
