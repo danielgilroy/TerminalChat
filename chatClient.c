@@ -133,7 +133,7 @@ void outgoingMessages(){
 
     int status;
     char user_message[256];
-    int message_length;
+    size_t message_length;
 
     do{
 
@@ -151,7 +151,9 @@ void outgoingMessages(){
             continue;
         }else if(user_message[0] == '/'){
 
-            //Process local commands
+            /* ---------------------- */
+            /* Process local commands */
+            /* ---------------------- */
 
             //Local command - Clear chat window
             if(strcmp(user_message, "/clear") == 0){
@@ -161,27 +163,43 @@ void outgoingMessages(){
                 continue;
             }
 
-            //Or fall through to send commands to server
-        }
+            //Local Command - Change colours
+            if(strncmp(user_message, "/colour ", 7) == 0){
+                //Convert british spelling "colour" to "color"
+                for(int i = 5; i < strlen(user_message); i++){
+                    user_message[i] = user_message[i+1];
+                }
+            }
+            if(strncmp(user_message, "/color ", 6) == 0){
 
-        /* Debug Local Print */
-        //wprintw(chat_win, "You: %s\n", user_message);
-        //wrefresh(chat_win); 
-        /* End Debug */
+                start_color();
+                init_pair(1, COLOR_WHITE, COLOR_BLACK);
+                init_pair(2, COLOR_YELLOW, COLOR_BLUE);
+                
+                if(strncmp(user_message + 7, "off", 3) == 0){
+                    wbkgd(chat_win, COLOR_PAIR(1));
+                }
+                if(strncmp(user_message + 7, "on", 2) == 0){
+                    wbkgd(chat_win, COLOR_PAIR(2));
+                }
+
+                wrefresh(chat_win);
+                wrefresh(stdscr);
+                continue;
+            }
+
+            /* ------------------------------------------ */
+            /* Or fall through to send commands to server */
+            /* ------------------------------------------ */
+        }
 
         message_length = strlen(user_message);
             
-        //Append carriage return and line feed to match telnet standard
-        //user_message[message_length] = '\r';
-        //user_message[++message_length] = '\n';
-
         status = sendMessage(user_message, message_length + 1);
         if(status == -1){
             perror("Error");
         }
 
-        
-        //Refresh windows
         wrefresh(chat_win);
         wrefresh(stdscr);
 
