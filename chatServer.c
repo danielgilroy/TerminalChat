@@ -278,9 +278,9 @@ void processClients(){
 
                 if(client_message[0] == '/'){
 
-                    /* ----------------------------------- */
-                    /* Received server command from client */
-                    /* ----------------------------------- */
+                    /* ------------------------------- */
+                    /* Process client's server command */
+                    /* ------------------------------- */
 
                     //List who's connected to the chat server
                     if(strncmp(client_message, "/who", 4) == 0){
@@ -352,11 +352,53 @@ void processClients(){
 
                     continue;
 
-                }else if(client_message[0] == '@'){
+                }else if(client_message[0] == '\r' || client_message[0] == '\n' || client_message[0] == '\0'){
+                    /* ----------------------------- */
+                    /* Ignore client's empty message */
+                    /* ----------------------------- */
+                    continue;
+                }else{
 
-                    /* ----------------------------------------- */
-                    /* Sending client's message to targeted user */
-                    /* ----------------------------------------- */
+                    /* --------------------------- */
+                    /* Check if client is spamming */
+                    /* --------------------------- */
+                    pthread_mutex_lock(&spam_lock);
+                    if(spam_timeout[i] != 0){ 
+                        //Client currently has a timeout period
+                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
+                        pthread_mutex_unlock(&spam_lock);
+                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                        continue;
+                    }else if(spam_message_count[i] >= spam_message_limit){ 
+                        //Give client a timeout period
+                        spam_timeout[i] = spam_timeout_length;
+                        pthread_mutex_unlock(&spam_lock);
+                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
+                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                        continue;
+                    }
+
+                    /* ------------------------ */
+                    /* Prepare client's message */
+                    /* ------------------------ */
+
+                    //Increment spam message count for client
+                    spam_message_count[i]++;
+                    pthread_mutex_unlock(&spam_lock);
+
+                    //Replace ending \n with \0 or ending \r\n with \0\0
+                    if(client_message[recv_status-1] == '\n'){
+                        client_message[recv_status-1] = '\0';
+                        if(client_message[recv_status-2] == '\r'){
+                            client_message[recv_status-2] = '\0';
+                            recv_status--;
+                        }
+                    }     
+
+                    /* -------------------------------------- */
+                    /* Send client's message to targeted user */
+                    /* -------------------------------------- */
+                    if(client_message[0] == '@'){
 
                         char target_user_name[USERNAME_LENGTH];
                         int target_username_length = strcspn(client_message + 1, " ");
@@ -402,46 +444,11 @@ void processClients(){
                         free(message);
                         continue;
 
-                }else if(client_message[0] == '\r' || client_message[0] == '\n' || client_message[0] == '\0'){
-                    /* ----------------------------- */
-                    /* Ignore client's empty message */
-                    /* ----------------------------- */
-                    continue;
-                }else{
-
-                    //Check spam_message_count to ensure client isn't spamming
-                    pthread_mutex_lock(&spam_lock);
-                    if(spam_timeout[i] != 0){ 
-                        //Client currently has a timeout period
-                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
-                        pthread_mutex_unlock(&spam_lock);
-                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
-                        continue;
-                    }else if(spam_message_count[i] >= spam_message_limit){ 
-                        //Give client a timeout period
-                        spam_timeout[i] = spam_timeout_length;
-                        pthread_mutex_unlock(&spam_lock);
-                        sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
-                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
-                        continue;
                     }
 
-                    /* ------------------------------------- */
-                    /* Sending client's message to all users */
-                    /* ------------------------------------- */
-
-                    //Increment message counter for client
-                    spam_message_count[i]++;
-                    pthread_mutex_unlock(&spam_lock);
-                    
-                    //Replace ending \n with \0 or ending \r\n with \0\0
-                    if(client_message[recv_status-1] == '\n'){
-                        client_message[recv_status-1] = '\0';
-                        if(client_message[recv_status-2] == '\r'){
-                            client_message[recv_status-2] = '\0';
-                            recv_status--;
-                        }
-                    }                    
+                    /* ---------------------------------- */
+                    /* Send client's message to all users */
+                    /* ---------------------------------- */            
                     
                     //Add sender's username to message
                     char *message = addUsernameToMessage(client_message, userNames[i]);      
@@ -454,6 +461,7 @@ void processClients(){
                     //Send message to all clients
                     sendMessageToAll(message, recv_status + additional_length);
                     free(message);
+
                 }
             }
         }
