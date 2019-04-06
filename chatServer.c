@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <ctype.h>
 #include <pthread.h>
 
 #include <sys/socket.h>
@@ -12,8 +13,11 @@
 
 #include "uthash.h"
 
+#define PORT_NUMBER 9002
+#define POLL_TIMEOUT 500 //Poll timeout in milliseconds: Reduce this if joining chat takes too long
 #define MAX_CLIENTS 4 //1000 //Max FD limit on linux is set to 1024 by default
 #define USERNAME_LENGTH 16
+#define MESSAGE_LENGTH 256
 
 void initializeServer();
 void *acceptNewClients(void *);
@@ -23,12 +27,12 @@ int sendMessage(int, char *, int);
 int sendMessageToAll(char *, int);
 char *addUsernameToMessage(char *, char *);
 void printTime();
-int strCompare(const void *, const void *);
 void checkStatus(int);
 void add_username(char *, int);
 void replace_username(char *, char *, int);
 struct table_entry *find_username(char *);
 void delete_username(struct table_entry *);
+int id_compare(struct table_entry *, struct table_entry *);
 
 struct pollfd client_fds[MAX_CLIENTS];
 int client_count = 0;
@@ -82,7 +86,7 @@ void initializeServer(){
     //Define the server's IP address and port
     struct sockaddr_in server_address;
     server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(9002);
+    server_address.sin_port = htons(PORT_NUMBER);
     server_address.sin_addr.s_addr = htonl(INADDR_ANY);
 
     //Bind the socket to our specified IP address and port
@@ -125,7 +129,7 @@ void *acceptNewClients(void *server){
     int status;
     int index = 0;
     int server_socket = *((int *) server);
-    char server_message[256];
+    char server_message[MESSAGE_LENGTH];
     char user_name[USERNAME_LENGTH];
 
     //Declare the client socket to connect to
@@ -221,8 +225,10 @@ void processClients(){
 
     int status;
     int recv_status;
-    char client_message[256];
-    char server_message[256];
+    int8_t changes = 1; //Boolean: Client has left or changed their name
+    char client_message[MESSAGE_LENGTH];
+    char server_message[MESSAGE_LENGTH];
+    char *who_message = NULL;
         
     while(1){
         
@@ -231,7 +237,7 @@ void processClients(){
         }
         sleep(0.05);
         pthread_mutex_lock(&fd_lock);
-        status = poll(client_fds, MAX_CLIENTS, 500);
+        status = poll(client_fds, MAX_CLIENTS, POLL_TIMEOUT);
         pthread_mutex_unlock(&fd_lock);   
 
         if(status == -1){
@@ -271,6 +277,8 @@ void processClients(){
                     //Remove username from array
                     usernames[i][0] = '\0';
 
+                    changes = 1;
+
                     //Close the client socket
                     status = close(client_fds[i].fd);
                     checkStatus(status);
@@ -288,51 +296,67 @@ void processClients(){
                     /* ------------------------------- */
 
                     //List who's connected to the chat server
-                    if(strncmp(client_message, "/who", 4) == 0){
+                    if(strncmp(client_message, "/who", 5) == 0){
                         
-                        /*TO DO: CHECK IF WE NEED TO REBUILD THE LIST*/
+                        char *message_prefix = "Server:";
+                        static int count = 0; //Client count since last rebuild of who_message
+                        size_t who_message_length;
 
-                        char **sortedUsers = malloc(MAX_CLIENTS * sizeof(char *));
-                        if(sortedUsers == NULL){
-                            perror("Malloc");
-                            exit(0);
-                        } 
-                        for(size_t j = 0; j < MAX_CLIENTS; j++){
-                            sortedUsers[j] = malloc(USERNAME_LENGTH * sizeof(char));
-                            if(sortedUsers[j] == NULL){
-                                perror("Malloc");
-                                exit(0); 
+                        //Check if the list of users needs to be rebuilt
+                        pthread_mutex_lock(&cc_lock);
+                        if(changes || count != client_count){
+
+                            //Set variables for the next /who command to check
+                            count = client_count;
+                            pthread_mutex_unlock(&cc_lock);
+                            changes = 0;
+
+                            //Allocate memory for the string of users
+                            who_message_length = strlen(message_prefix) + (count * USERNAME_LENGTH) + 1 ;
+                            char *new_ptr = realloc(who_message, who_message_length);
+                            if(new_ptr == NULL){
+                                fprintf(stderr, "Error allocating memory for /who function\n");
+                                exit(0);
                             }
-                            strncpy(sortedUsers[j], usernames[j], USERNAME_LENGTH);
-                        }
-                        
-                        qsort(sortedUsers, MAX_CLIENTS, sizeof(char *), strCompare);
-                        sprintf(server_message, "Server: Current users are; %s", sortedUsers[0]);
+                            who_message = new_ptr;
 
-                        for(size_t j = 1; j < MAX_CLIENTS; j++){
-                            if(sortedUsers[j][0] == '\0'){
-                                break;
-                            } 
-                            strcat(server_message, ", ");
-                            strcat(server_message, sortedUsers[j]); 
+                            //Copy prefix message to the string
+                            strcpy(who_message, message_prefix);
+
+                            //Sort the hash table so usernames are printed in order
+                            HASH_SORT(username_to_fd, id_compare);
+                                                    
+                            //Itterate through the hash table and append usernames
+                            struct table_entry *s;
+                            for(s=username_to_fd; s != NULL; s=s->hh.next) {
+                                strcat(who_message, " ");
+                                strcat(who_message, s->id);
+                            }
+
+                        }else{
+                            //Unlock mutex that was locked when reading client_count
+                            pthread_mutex_unlock(&cc_lock);
                         }
 
-                        for(size_t j = 0; j < MAX_CLIENTS; j++){
-                            free(sortedUsers[j]);
-                        }
-                        free(sortedUsers);
-
-                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                        //Send message containing current users to the client
+                        sendMessage(client_fds[i].fd, who_message, who_message_length);
                         continue; 
                     }
 
-                    //Change client's username
-                    if(strncmp(client_message, "/nick ", 6) == 0){
+                    //Change username or echo back current one
+                    if(strncmp(client_message, "/nick", 5) == 0){
                     
-                        char new_name[16];
+                        if(client_message[5] == '\0'){
+                            //Echo back current username
+                            sprintf(server_message, "Server: Your username is \"%s\"", usernames[i]);
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;
+                        }
+
+                        char new_name[USERNAME_LENGTH];
 
                         //Get new name from client's message
-                        strncpy(new_name, client_message + 6, 16);
+                        strncpy(new_name, client_message + 6, USERNAME_LENGTH);
 
                         //Check if new name is too long
                         if(new_name[15] != '\0'){
@@ -341,22 +365,36 @@ void processClients(){
                             continue;
                         }
 
-                        //Check if new name has any spaces
-                        if(strchr(new_name, ' ') != NULL){
-                            sprintf(server_message, "Server: Username must not contain spaces");
+                        //Check if new name has any whitespace
+                        if(strpbrk(new_name, " \t\n\v\f\r")){
+                            sprintf(server_message, "Server: Usernames with spaces are restricted");
                             sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                             continue;                            
                         }
 
-                        //Check if new name is already in use
-                        struct table_entry *target_user = find_username(new_name);
-                        if(target_user != NULL){
-                            sprintf(server_message, "Server: The name %s is already in use", new_name);
+                        //Check if new name is a restricted name
+                        if(strcasecmp(new_name, "Server") == 0){
+                            sprintf(server_message, "Server: The username \"%s\" is restricted", new_name);
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;  
+                        }
+                        if(strcasecmp(new_name, "") == 0){
+                            sprintf(server_message, "Server: Blank usernames are restricted");
+                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            continue;                              
+                        }
+
+                        //Force the first letter of the name to be uppercase
+                        new_name[0] = toupper(new_name[0]);
+
+                        //Check if username is already in use
+                        if(find_username(new_name) != NULL){
+                            sprintf(server_message, "Server: The username \"%s\" is already in use", new_name);
                             sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                             continue;
                         }
                         
-                        //Send message to all clients informing them of name change
+                        //Send message to all clients informing them of the name change
                         printf("**%s on socket %d changed username to %s**\n", usernames[i], client_fds[i].fd, new_name);
                         sprintf(server_message, "Server: %s changed name to %s", usernames[i], new_name);
                         sendMessageToAll(server_message, strlen(server_message) + 1);
@@ -365,8 +403,13 @@ void processClients(){
                         replace_username(usernames[i], new_name, client_fds[i].fd);
                         strcpy(usernames[i], new_name);
 
+                        changes = 1;
+
                         continue;
                     }
+
+                    sprintf(server_message, "Server: \"%s\" is not a valid command", client_message);
+                    sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
 
                     continue;
 
@@ -430,6 +473,8 @@ void processClients(){
                         strncpy(target_user_name, client_message + 1, target_username_length);
                         target_user_name[target_username_length] = '\0'; //Null terminate username
 
+                        target_user_name[0] = toupper(target_user_name[0]);
+
                         struct table_entry *target_user = find_username(target_user_name);
                         if(target_user == NULL){
                             //Username does not exist
@@ -444,7 +489,7 @@ void processClients(){
 
                         if(message[0] == '\0' || message[-1] != ' '){
                             //Message to user is blank
-                            sprintf(server_message, "Server: Message to user \"%s\" was blank", target_user_name);
+                            sprintf(server_message, "Server: The message to \"%s\" was blank", target_user_name);
                             sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
                             continue;
                         }
@@ -517,8 +562,7 @@ int sendMessageToAll(char *message, int message_length){
 char *addUsernameToMessage(char *message, char *username){
 //NOTE: Calling function must call free on the allocated memory
 
-    //char message_result = malloc(256 + USERNAME_LENGTH);
-    char *message_result = malloc(280);
+    char *message_result = malloc(MESSAGE_LENGTH + USERNAME_LENGTH + 2);
     if(message_result == NULL){
         fprintf(stderr, "Error allocating memory");
         exit(EXIT_FAILURE);
@@ -539,15 +583,6 @@ void printTime(){
 
     //Print time to terminal
     printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
-}
-
-int strCompare(const void *a, const void *b){
-    char *aa = *(char **) a;
-    char *bb = *(char **) b;
-    if(aa[0] == '\0' || bb[0] == '\0'){
-        return strncmp(bb, aa, USERNAME_LENGTH); //Put empty strings at end of array
-    }
-    return strncmp(aa, bb, USERNAME_LENGTH);
 }
 
 void checkStatus(int status){
@@ -580,4 +615,8 @@ struct table_entry *find_username(char *username){
 void delete_username(struct table_entry *user) {
     HASH_DEL(username_to_fd, user);  /* user: pointer to deletee */
     free(user);             /* optional; it's up to you! */
+}
+
+int id_compare(struct table_entry *a, struct table_entry *b){
+    return (strcasecmp(a->id, b->id));
 }
