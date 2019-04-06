@@ -60,7 +60,6 @@ void initializeChat(){
     //Refresh windows so they appear on screen
     wrefresh(chat_win);
     wrefresh(stdscr);
-
 }
 
 void initializeConnection(){
@@ -126,7 +125,6 @@ void *incomingMessages(){
 
         printToChat(server_message);
     }
-
 }
 
 void outgoingMessages(){
@@ -207,16 +205,13 @@ void outgoingMessages(){
   
     wprintw(chat_win, "\n -Leaving chat server-\n");
     wrefresh(chat_win); 
-
 }
 
 void printToChat(char * message){
-
     printTime();
     wprintw(chat_win, "%s\n", message);
     wrefresh(chat_win); //Show message on chat window
     wrefresh(stdscr); //Ensures cursor in text window is show
-
 }
 
 void printTime(){
@@ -236,7 +231,6 @@ void printTime(){
 static void handler(int signum){
 	pthread_exit(NULL);
 }
-
 
 
 /* Debugging method */

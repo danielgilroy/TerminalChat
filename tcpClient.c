@@ -63,7 +63,7 @@ int sendMessage(char *message, int message_length){
 
     int status;
 
-    if(!strcmp(message, "/exit\n")){
+    if(!strcmp(message, "/exit\n") || !strcmp(message, "/quit")){
         status = closeSocket(network_socket);
     }else{
         status = send(network_socket, message, message_length, 0);
