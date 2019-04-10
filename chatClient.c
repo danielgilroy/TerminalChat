@@ -10,13 +10,16 @@
 
 #include "tcpClient.h"
 
+#define MESSAGE_LENGTH 256
+#define MESSAGE_START 0x02
+
 void initializeChat();
 void initializeConnection();
 void terminateChat();
 void terminateChatNow();
 void *incomingMessages();
 void outgoingMessages();
-void printToChat(char *);
+void printToChat(char *, int);
 void printTime();
 static void handler(int);
 void *printMessage();
@@ -63,12 +66,12 @@ void initializeChat(){
 }
 
 void initializeConnection(){
-    int status;
-    char response[256];
+    int recv_status;
+    char response[MESSAGE_LENGTH];
 
-    status = joinServer(response);
+    recv_status = joinServer(response);
 
-    if (status < 0){
+    if (recv_status < 0){
         wprintw(chat_win, "\n -There was an error connecting to the server-\n");
         wprintw(chat_win, "    -The chat client will close shortly-\n");
         wrefresh(chat_win);
@@ -76,7 +79,7 @@ void initializeConnection(){
         terminateChat();
     }
 
-    printToChat(response);
+    printToChat(response, recv_status);
 }
 
 void terminateChat(){
@@ -98,20 +101,20 @@ void terminateChatNow(){
 
 void *incomingMessages(){
 
-    int status;
-    char server_message[256];
+    int recv_status;
+    char server_message[MESSAGE_LENGTH];
      
     while(1){
 
-        status = receiveMessage(server_message, sizeof(server_message));
+        recv_status = receiveMessage(server_message, MESSAGE_LENGTH);
     
-        if(status == 0){
+        if(recv_status == 0){
             wprintw(chat_win, "\n   -The connection to the server has been lost-\n");
             wprintw(chat_win, "       -The chat client will close shortly-\n");
             wrefresh(chat_win);
             sleep(3);
             terminateChatNow();  
-        }else if(status == -1){
+        }else if(recv_status == -1){
             wprintw(chat_win, "\n      -There was an error-\n");
             wprintw(chat_win, " -The chat client will close shortly-\n");
             wrefresh(chat_win);
@@ -123,20 +126,20 @@ void *incomingMessages(){
         //wprintw(chat_win, "Received %d characters\n", status);
         /* ----------- */
 
-        printToChat(server_message);
+        printToChat(server_message, recv_status);
     }
 }
 
 void outgoingMessages(){
 
     int status;
-    char user_message[256];
+    char user_message[MESSAGE_LENGTH];
     size_t message_length;
 
     do{
 
         //Get input string from the user
-        getnstr(user_message, COLS - 10);
+        getnstr(user_message, COLS - 5);
 
         //Move cursor to starting position and clear the line
         wmove(stdscr, LINES-1, 6);
@@ -191,6 +194,10 @@ void outgoingMessages(){
             /* ------------------------------------------ */
         }
 
+        //Add a control character to the start of message so we know when it's
+        //a new message since the message may be split up over multiple packets
+        //message[0] = 0x02; //Start of text control character
+
         message_length = strlen(user_message);
             
         status = sendMessage(user_message, message_length + 1);
@@ -207,9 +214,30 @@ void outgoingMessages(){
     wrefresh(chat_win); 
 }
 
-void printToChat(char * message){
-    printTime();
-    wprintw(chat_win, "%s\n", message);
+void printToChat(char * message, int bytes){
+    
+    //wprintw(chat_win, "\nReceived %d bytes", bytes);
+    //wrefresh(chat_win);
+
+    int length = 0;
+    while(bytes > 0){
+        //wprintw(chat_win, "\n%d\n", bytes);
+        if(message[0] == MESSAGE_START){
+            wprintw(chat_win, "\n");
+            printTime(); 
+            message++;
+            bytes--;
+        }
+        wprintw(chat_win, "%s", message);
+        length = strlen(message); 
+        message += length + 1; //Move to next string - Plus one to include the null character
+        if(length == bytes){
+            bytes -= length; //Remaining bytes without a null character (the remainder is in another packet)
+        }else{
+            bytes -= length + 1; //Remaining bytes with a null character (the string is finished in this packet)
+        }
+    }
+    //wprintw(chat_win, "\n%d remaining", bytes);
     wrefresh(chat_win); //Show message on chat window
     wrefresh(stdscr); //Ensures cursor in text window is show
 }
@@ -231,6 +259,8 @@ void printTime(){
 static void handler(int signum){
 	pthread_exit(NULL);
 }
+
+
 
 
 /* Debugging method */

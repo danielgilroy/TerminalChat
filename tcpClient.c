@@ -10,11 +10,14 @@
 
 #include "tcpClient.h"
 
+#define MESSAGE_LENGTH 256
+
 int network_socket;
 
 int joinServer(char *response){
 
-    int status;
+    int recv_status;
+    //char server_response[MESSAGE_LENGTH];
 
     //Create Socket
     network_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -27,36 +30,36 @@ int joinServer(char *response){
     server_address.sin_addr.s_addr = htonl(INADDR_ANY);
 
     //Perform the connection using the socket and address struct
-    status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
+    recv_status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
     
     //Check for error with the connection
-    if(status){
+    if(recv_status){
         //fprintf(stderr, "There was an error making a connection to the remote socket\n\n");
         closeSocket(network_socket);
-        return status;
+        return recv_status;
     }
 
     //Recieve welcome message from the server
-    char server_response[256];
-    status = recv(network_socket, &server_response, sizeof(server_response), 0);
-    checkStatus(status);
+    recv_status = recv(network_socket, response, MESSAGE_LENGTH, 0);
+    checkStatus(recv_status);
 
     //Copy server response into chat_client buffer to be printed
-    strcpy(response, server_response);
+    //strncpy(response, server_response, recv_status);
 
-    return status;
+    return recv_status;
 }
 
 int receiveMessage(char *message, int message_length){
 
-    int status;
-    status = recv(network_socket, message, message_length, 0);
+    int recv_status;
 
-    if(status <= 0) {
+    recv_status = recv(network_socket, message, message_length, 0);
+
+    if(recv_status <= 0) {
         closeSocket(network_socket);
     }
-
-    return status;
+    
+    return recv_status;
 }
 
 int sendMessage(char *message, int message_length){
