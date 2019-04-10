@@ -18,6 +18,7 @@
 #define MAX_CLIENTS 4 //1000 //Max FD limit on linux is set to 1024 by default
 #define USERNAME_LENGTH 16
 #define MESSAGE_LENGTH 256
+#define MESSAGE_START 0x02 //Start of Text control character
 
 void initializeServer();
 void *acceptNewClients(void *);
@@ -102,7 +103,12 @@ void initializeServer(){
         client_fds[i].fd = -1;
         client_fds[i].events = POLLIN;
     }
-    
+
+    //Initialize default usernames
+    for(size_t i = 0; i < MAX_CLIENTS; i++){
+        snprintf(usernames[i], USERNAME_LENGTH, "Client%lu", i + 1);
+    }
+
     //Create thread for processing new clients
     pthread_t tid;
     pthread_create(&tid, NULL, acceptNewClients, (void *) &server_socket);
@@ -128,13 +134,15 @@ void *acceptNewClients(void *server){
 
     int status;
     int index = 0;
-    int server_socket = *((int *) server);
-    char server_message[MESSAGE_LENGTH];
-    char user_name[USERNAME_LENGTH];
-
-    //Declare the client socket to connect to
     int client_socket;
+    int server_socket = *((int *) server);
+    char server_message_prefixed[MESSAGE_LENGTH];
+    char *server_message = server_message_prefixed + 1;
 
+    //Add a control character to the start of message so we know when it's
+    //a new message since the message may be split up over multiple packets
+    server_message_prefixed[0] = MESSAGE_START;
+    
     printf("**Awaiting clients**\n");
 
     while(1){
@@ -149,7 +157,7 @@ void *acceptNewClients(void *server){
             pthread_mutex_unlock(&cc_lock);
             printf("**Server has reached the maximum of %d clients**\n", MAX_CLIENTS);
             sprintf(server_message, "Server: The server has reached the maximum of %d clients", MAX_CLIENTS);
-            sendMessage(client_socket, server_message, strlen(server_message) + 1);
+            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
             status = close(client_socket);
             checkStatus(status);
             continue;
@@ -158,11 +166,14 @@ void *acceptNewClients(void *server){
             pthread_mutex_unlock(&cc_lock);
         }
         
-
         //Find an available spot in the FD array
         while(client_fds[index].fd > 0){
             index = (index + 1) % MAX_CLIENTS;
         }
+
+        //Send message to every client letting them know someone joined the server
+        sprintf(server_message, "Server: Client%d joined the server", index + 1);
+        sendMessageToAll(server_message_prefixed, strlen(server_message_prefixed) + 1);
 
         //Assign the socket to the client FD
         waitingForMutex = 1;
@@ -171,22 +182,19 @@ void *acceptNewClients(void *server){
         pthread_mutex_unlock(&fd_lock);
         waitingForMutex = 0;
 
-        //Give client a default username based on file descriptor
-        sprintf(user_name, "Client%d", client_fds[index].fd);
-        strcpy(usernames[index], user_name); //Potenial thread issue without a mutex lock!!!
-        add_username(user_name, client_socket);
+        //MOVE THIS TO MAIN THREAD
+        //Add to a list to be processed in the main thread instead---------------------------------------------------------------------
+        add_username(usernames[index], client_socket); 
+        //-----------------------------------------------------------------------------------------------------------------------------
       
         //Print message to the server's terminal
-        printf("**Client on socket %d joined the server**\n", client_socket);
+        printf("**Client%d on socket %d joined the server**\n", index + 1, client_socket);
     
         //Send welcome message to the client socket
-        sprintf(server_message, "Server: Welcome to the server! You are using socket %d", client_socket);
-        sendMessage(client_socket, server_message, strlen(server_message) + 1);
+        sprintf(server_message, "Server: Welcome to the server Client%d!", index + 1);
+        sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
-        //Send message to every client letting them know someone joined the server
-        sprintf(server_message, "Server: Client%d joined the server", client_socket);
-        sendMessageToAll(server_message, strlen(server_message) + 1);
-
+        sleep(0.5);
     }
 }
 
@@ -225,10 +233,16 @@ void processClients(){
 
     int status;
     int recv_status;
+    int client_socket;
     int8_t changes = 1; //Boolean: Client has left or changed their name
     char client_message[MESSAGE_LENGTH];
-    char server_message[MESSAGE_LENGTH];
+    char server_message_prefixed[MESSAGE_LENGTH];
+    char *server_message = server_message_prefixed + 1;
     char *who_message = NULL;
+
+    //Add a control character to the start of message so we know when it's
+    //a new message since the message may be split up over multiple packets
+    server_message_prefixed[0] = MESSAGE_START;
         
     while(1){
         
@@ -239,6 +253,10 @@ void processClients(){
         pthread_mutex_lock(&fd_lock);
         status = poll(client_fds, MAX_CLIENTS, POLL_TIMEOUT);
         pthread_mutex_unlock(&fd_lock);   
+
+
+        //Move username hash table Here?
+
 
         if(status == -1){
             perror("Error");
@@ -252,10 +270,12 @@ void processClients(){
             
         //Event has occurred: Check all clients for events
         for(size_t i = 0; i < MAX_CLIENTS; i++){
-        
+
             if(client_fds[i].revents & POLLIN){
 
-                recv_status = recv(client_fds[i].fd, client_message, sizeof(client_message), 0);
+                client_socket = client_fds[i].fd;
+
+                recv_status = recv(client_socket, client_message, MESSAGE_LENGTH, 0);
                 checkStatus(recv_status);
 
                 if(recv_status == 0){
@@ -265,24 +285,30 @@ void processClients(){
                     /* -------------------------- */
 
                     //Print message to server terminal
-                    printf("**%s on socket %d left the server**\n", usernames[i], client_fds[i].fd);
+                    printf("**%s on socket %d left the server**\n", usernames[i], client_socket);
                 
                     //Print message to chat server
-                    sprintf(client_message, "Server: %s left the server", usernames[i]);
-                    sendMessageToAll(client_message, strlen(client_message) + 1);
+                    sprintf(server_message, "Server: %s left the server", usernames[i]);
+                    sendMessageToAll(server_message_prefixed, strlen(server_message_prefixed) + 1);
                     
                     //Remove username from hash table
                     delete_username(find_username(usernames[i]));
                     
-                    //Remove username from array
-                    usernames[i][0] = '\0';
+                    //Revert username back to default
+                    snprintf(usernames[i], USERNAME_LENGTH, "Client%lu", i + 1);
+
+                    //Clear spam timeout and message count so new users using the same spot aren't affected
+                    pthread_mutex_lock(&spam_lock);
+                    spam_timeout[i] = 0;
+                    spam_message_count[i] = 0;
+                    pthread_mutex_unlock(&spam_lock);
 
                     changes = 1;
 
                     //Close the client socket
-                    status = close(client_fds[i].fd);
+                    status = close(client_socket);
                     checkStatus(status);
-                    client_fds[i].fd = -1;
+                    client_fds[i].fd = -1; //MUTEX LOCK???????????????????????????????????????????????????????????????????????????
                     pthread_mutex_lock(&cc_lock);
                     client_count--;
                     pthread_mutex_unlock(&cc_lock);
@@ -298,9 +324,9 @@ void processClients(){
                     //List who's connected to the chat server
                     if(strncmp(client_message, "/who", 5) == 0){
                         
-                        char *message_prefix = "Server:";
                         static int count = 0; //Client count since last rebuild of who_message
                         size_t who_message_length;
+                        char *message_prefix = "Server:";
 
                         //Check if the list of users needs to be rebuilt
                         pthread_mutex_lock(&cc_lock);
@@ -312,7 +338,8 @@ void processClients(){
                             changes = 0;
 
                             //Allocate memory for the string of users
-                            who_message_length = strlen(message_prefix) + (count * USERNAME_LENGTH) + 1 ;
+                            //Add an additionl two bytes for MESSAGE_START character and ending null character                       
+                            who_message_length = 1 + strlen(message_prefix) + (count * USERNAME_LENGTH) + 1;      
                             char *new_ptr = realloc(who_message, who_message_length);
                             if(new_ptr == NULL){
                                 fprintf(stderr, "Error allocating memory for /who function\n");
@@ -320,8 +347,9 @@ void processClients(){
                             }
                             who_message = new_ptr;
 
-                            //Copy prefix message to the string
-                            strcpy(who_message, message_prefix);
+                            //Insert MESSAGE_START character and copy message prefix
+                            who_message[0] = MESSAGE_START;
+                            strcpy(who_message + 1, message_prefix);
 
                             //Sort the hash table so usernames are printed in order
                             HASH_SORT(username_to_fd, id_compare);
@@ -339,19 +367,19 @@ void processClients(){
                         }
 
                         //Send message containing current users to the client
-                        sendMessage(client_fds[i].fd, who_message, who_message_length);
+                        sendMessage(client_socket, who_message, strlen(who_message) + 1);
                         continue; 
                     }
 
-                    //Change username or echo back current one
-                    if(strncmp(client_message, "/nick", 5) == 0){
-                    
-                        if(client_message[5] == '\0'){
-                            //Echo back current username
-                            sprintf(server_message, "Server: Your username is \"%s\"", usernames[i]);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
-                            continue;
-                        }
+                    //Echo back the client's current username
+                    if(strncmp(client_message, "/nick", 6) == 0){
+                        sprintf(server_message, "Server: Your username is \"%s\"", usernames[i]);
+                        sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                        continue;
+                    }
+
+                    //Change the client's current username
+                    if(strncmp(client_message, "/nick ", 6) == 0){
 
                         char new_name[USERNAME_LENGTH];
 
@@ -361,27 +389,37 @@ void processClients(){
                         //Check if new name is too long
                         if(new_name[15] != '\0'){
                             sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
                         //Check if new name has any whitespace
                         if(strpbrk(new_name, " \t\n\v\f\r")){
                             sprintf(server_message, "Server: Usernames with spaces are restricted");
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;                            
                         }
 
                         //Check if new name is a restricted name
-                        if(strcasecmp(new_name, "Server") == 0){
-                            sprintf(server_message, "Server: The username \"%s\" is restricted", new_name);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
-                            continue;  
-                        }
                         if(strcasecmp(new_name, "") == 0){
                             sprintf(server_message, "Server: Blank usernames are restricted");
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;                              
+                        }
+                        if(strncasecmp(new_name, "Server", 6) == 0){
+                            sprintf(server_message, "Server: The username \"%s\" is restricted", new_name);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            continue;  
+                        }
+                        if(strncasecmp(new_name, "Client", 6) == 0){
+                            sprintf(server_message, "Server: The username \"%s\" is restricted", new_name);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            continue;  
+                        }                        
+                        if(strncasecmp(new_name, "Admin", 5) == 0){
+                            sprintf(server_message, "Server: The username \"%s\" is restricted", new_name);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            continue;  
                         }
 
                         //Force the first letter of the name to be uppercase
@@ -390,17 +428,17 @@ void processClients(){
                         //Check if username is already in use
                         if(find_username(new_name) != NULL){
                             sprintf(server_message, "Server: The username \"%s\" is already in use", new_name);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
                         
                         //Send message to all clients informing them of the name change
-                        printf("**%s on socket %d changed username to %s**\n", usernames[i], client_fds[i].fd, new_name);
-                        sprintf(server_message, "Server: %s changed name to %s", usernames[i], new_name);
-                        sendMessageToAll(server_message, strlen(server_message) + 1);
+                        printf("**%s on socket %d changed username to %s**\n", usernames[i], client_socket, new_name);
+                        sprintf(server_message, "Server: %s changed their name to %s", usernames[i], new_name);
+                        sendMessageToAll(server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                         //Change username in hash table and array
-                        replace_username(usernames[i], new_name, client_fds[i].fd);
+                        replace_username(usernames[i], new_name, client_socket);
                         strcpy(usernames[i], new_name);
 
                         changes = 1;
@@ -409,7 +447,7 @@ void processClients(){
                     }
 
                     sprintf(server_message, "Server: \"%s\" is not a valid command", client_message);
-                    sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                    sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                     continue;
 
@@ -428,14 +466,14 @@ void processClients(){
                         //Client currently has a timeout period
                         sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
                         pthread_mutex_unlock(&spam_lock);
-                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                        sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                         continue;
-                    }else if(spam_message_count[i] >= spam_message_limit){ 
+                    }else if(spam_message_count[i] > spam_message_limit){ 
                         //Give client a timeout period
                         spam_timeout[i] = spam_timeout_length;
                         pthread_mutex_unlock(&spam_lock);
                         sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout_length);
-                        sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                        sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                         continue;
                     }
 
@@ -466,7 +504,7 @@ void processClients(){
                         if(target_username_length > USERNAME_LENGTH - 1){
                             //Username is too long
                             sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
@@ -479,7 +517,7 @@ void processClients(){
                         if(target_user == NULL){
                             //Username does not exist
                             sprintf(server_message, "Server: The user \"%s\" does not exist", target_user_name);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
@@ -490,18 +528,18 @@ void processClients(){
                         if(message[0] == '\0' || message[-1] != ' '){
                             //Message to user is blank
                             sprintf(server_message, "Server: The message to \"%s\" was blank", target_user_name);
-                            sendMessage(client_fds[i].fd, server_message, strlen(server_message) + 1);
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
                         //Add sender's username to message
                         message = addUsernameToMessage(message, usernames[i]);
-                        size_t additional_length = strlen(usernames[i]) + 2; //Add two for ": "
+                        size_t additional_length = strlen(usernames[i]) + 3; //Add three for 0x02 and ": "
 
                         //Send message to target user and sender
                         sendMessage(target_user->client_fd, message, recv_status + additional_length);
-                        if(target_user->client_fd != client_fds[i].fd){
-                            sendMessage(client_fds[i].fd, message, recv_status + additional_length);
+                        if(target_user->client_fd != client_socket){
+                            sendMessage(client_socket, message, recv_status + additional_length);
                         }
 
                         free(message);
@@ -515,16 +553,21 @@ void processClients(){
                     
                     //Add sender's username to message
                     char *message = addUsernameToMessage(client_message, usernames[i]);      
-                    size_t additional_length = strlen(usernames[i]) + 2; //Add two for ": "        
+                    size_t additional_length = strlen(usernames[i]) + 3; //Add three for 0x02 and ": "       
 
                     //Print client's message to server console
                     printTime();
-                    printf("%s\n", message);
+                    printf("%s\n", message + 1); //Add one to skip MESSAGE_START character
 
                     //Send message to all clients
                     sendMessageToAll(message, recv_status + additional_length);
+                    /*sendMessageToAll(message, recv_status + additional_length);
+                    sendMessageToAll(message, recv_status + additional_length);
+                    sendMessageToAll(message, recv_status + additional_length);
+                    sendMessageToAll(message, recv_status + additional_length);
+                    sendMessageToAll(message, recv_status + additional_length);
+                    */
                     free(message);
-
                 }
             }
         }
@@ -547,7 +590,7 @@ int sendMessageToAll(char *message, int message_length){
 
     for(size_t i = 0; i < MAX_CLIENTS; i++){
 
-        if(client_fds[i].fd <= 0){
+        if(client_fds[i].fd <= 0){ //MUTEX LOCK????????????????????????????????????????????????????????????????????????????????
             continue; //Ignore invalid FDs
         }
 
@@ -562,12 +605,16 @@ int sendMessageToAll(char *message, int message_length){
 char *addUsernameToMessage(char *message, char *username){
 //NOTE: Calling function must call free on the allocated memory
 
-    char *message_result = malloc(MESSAGE_LENGTH + USERNAME_LENGTH + 2);
+    char *message_result = malloc(1 + USERNAME_LENGTH + 2 + MESSAGE_LENGTH);
     if(message_result == NULL){
         fprintf(stderr, "Error allocating memory");
         exit(EXIT_FAILURE);
     }
-    strncpy(message_result, username, USERNAME_LENGTH);
+    
+    //Add a control character to the start of message so we know when it's
+    //a new message since the message may be split up over multiple packets
+    message_result[0] = 0x02;
+    strcat(message_result, username);
     strcat(message_result, ": ");
     strcat(message_result, message);
     return message_result;
