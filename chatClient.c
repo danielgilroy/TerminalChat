@@ -219,7 +219,33 @@ void printToChat(char * message, int bytes){
     //wprintw(chat_win, "\nReceived %d bytes", bytes);
     //wrefresh(chat_win);
 
-    int length = 0;
+    
+    char *next;
+    do{
+        //wprintw(chat_win, "\n%d\n", bytes);
+        if(message[0] == MESSAGE_START){
+            wprintw(chat_win, "\n");
+            printTime(); 
+            message++; //Skip over message start character
+        }
+                
+        wprintw(chat_win, "%s", message);
+
+        message += strlen(message) + 1; //Move to next string - Add one to skip over the null character
+        next = strchr(message, MESSAGE_START);
+        if(next != NULL){
+            next[0] = '\0';
+            wprintw(chat_win, "%s", message);
+            next[0] = MESSAGE_START;
+            message = next;
+        }else{
+            break;
+        }
+
+    }while(1);
+    
+
+    /*int length = 0;
     while(bytes > 0){
         //wprintw(chat_win, "\n%d\n", bytes);
         if(message[0] == MESSAGE_START){
@@ -230,14 +256,14 @@ void printToChat(char * message, int bytes){
         }
         wprintw(chat_win, "%s", message);
         length = strlen(message); 
-        message += length + 1; //Move to next string - Plus one to include the null character
+        message += length + 1; //Move to next string - Add one to skip over the null character
         if(length == bytes){
             bytes -= length; //Remaining bytes without a null character (the remainder is in another packet)
         }else{
             bytes -= length + 1; //Remaining bytes with a null character (the string is finished in this packet)
         }
-    }
-    //wprintw(chat_win, "\n%d remaining", bytes);
+    }*/
+
     wrefresh(chat_win); //Show message on chat window
     wrefresh(stdscr); //Ensures cursor in text window is show
 }
