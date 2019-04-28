@@ -1,5 +1,5 @@
-CC=gcc
-CFLAGS=-I.
+CC = gcc
+CFLAGS = -I.
 
 chatServer: chatServer.c
-	$(CC) -Wall -pedantic -o chatServer chatServer.c -lncurses -lpthread
+	$(CC) -g -O0 -Wall -pedantic -o chatServer chatServer.c -lncurses -lpthread

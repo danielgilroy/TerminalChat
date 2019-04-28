@@ -5,6 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <pthread.h>
+#include <stdbool.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -22,6 +23,7 @@
 #define MAX_ROOMS 11
 #define LOBBY_ROOM_ID 0
 #define USERNAME_LENGTH 16
+#define WHO_LENGTH 64
 #define MESSAGE_LENGTH 256
 #define MESSAGE_START 0x02 //Start of Text control character
 #define SPAM_MESSAGE_LIMIT 10 //Max messages within spam interval window
@@ -30,7 +32,6 @@
 
 void initializeServer();
 void *spamFilter();
-void *acceptNewClients(void *);
 void processClients(int);
 int sendMessage(int, char *, int);
 int sendMessageToAll(int, char *, int);
@@ -45,11 +46,10 @@ void change_username(int, struct table_entry *, char *);
 void delete_user(int, struct table_entry *);
 int id_compare(struct table_entry *, struct table_entry *);
 
-struct pollfd socket_fds[MAX_SOCKETS];
+struct pollfd socket_fds[MAX_SOCKETS]; //Memset me ------------------------------------------------------------------------------------
 int socket_count = 0;
-pthread_mutex_t cc_lock;
-
-char usernames[MAX_SOCKETS][USERNAME_LENGTH];
+bool shutdown_server = false;
+pthread_mutex_t shutdown_lock;
 
 struct table_entry{
     char id[USERNAME_LENGTH];                    /* key */
@@ -69,10 +69,12 @@ pthread_mutex_t spam_lock;
 int main(){
 
     printf("**Starting Server**\n");
+    pthread_mutex_init(&shutdown_lock, NULL);
     pthread_mutex_init(&spam_lock, NULL);
     initializeServer();
 
     printf("**Shutting Down Server**\n");
+    pthread_mutex_destroy(&shutdown_lock);
     pthread_mutex_destroy(&spam_lock);
 
     return 0;
@@ -120,12 +122,6 @@ void initializeServer(){
         socket_fds[i].events = POLLIN;
     }
 
-    //Initialize default usernames
-    snprintf(usernames[0], USERNAME_LENGTH, "Server");
-    for(size_t i = 1; i < MAX_SOCKETS; i++){
-        snprintf(usernames[i], USERNAME_LENGTH, "Client%lu", i);
-    }
-
     //Create thread for spam filter
     pthread_t spam_tid;
     pthread_create(&spam_tid, NULL, spamFilter, NULL);
@@ -169,36 +165,48 @@ void *spamFilter(){
             }
         }
         pthread_mutex_unlock(&spam_lock);
+
+        pthread_mutex_lock(&shutdown_lock);
+        if(shutdown_server){
+            pthread_mutex_unlock(&shutdown_lock);
+            break;
+        }
+        pthread_mutex_unlock(&shutdown_lock);
         
     }
+
+    return NULL;
 }
 
 void processClients(int server_socket){
 
-    size_t index = 1; //Start at 1 to skip server socket
     int status, flags;
     int recv_status;
     int client_socket;
-    int8_t message_recv[MAX_SOCKETS] = {0, };
+    size_t index = 1; //Start at 1 to skip server socket
+    bool message_recv[MAX_SOCKETS] = {false, };
+    char username[USERNAME_LENGTH];
     char client_message[MESSAGE_LENGTH + 1];
     char server_message_prefixed[MESSAGE_LENGTH];
     char *server_message = server_message_prefixed + 1;
     char *who_message[MAX_ROOMS] = {NULL, };
 
-    //Add a control character to the start of message so we know when it's
-    //a new message since the message may be split up over multiple packets
+    //Add control character to the start of message so we know when it's a
+    //new message since the message may be split up over multiple packets
     server_message_prefixed[0] = MESSAGE_START;
 
-    //Null terminate client message
+    //Extra fail safe to ensure NULL terminated client message
     client_message[MESSAGE_LENGTH] = '\0';
 
-    //Allocate space for empty strings
-    for(int i = 0; i < MAX_ROOMS; i++){
-        who_message[i] = malloc(sizeof(char));
-        if(who_message[i] == NULL){
+    //Allocate initial space for who_message strings and set them to the default message
+    for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
+        who_message[room_id] = malloc(sizeof(char) * WHO_LENGTH);
+        if(who_message[room_id] == NULL){
             fprintf(stderr, "Error allocating memory for who_message\n");
             exit(0);
         }
+        who_message[room_id][0] = MESSAGE_START;
+        sprintf(who_message[room_id] + 1, "Server: Room #%d is empty", room_id);
     }
 
     printf("**Awaiting Clients**\n");
@@ -271,8 +279,11 @@ void processClients(int server_socket){
                 //Assign the socket to the client FD
                 socket_fds[index].fd = client_socket;
 
+                //Create client's default username
+                sprintf(username, "Client%zu", index);
+
                 //Send server welcome messages to client
-                sprintf(server_message, "Server: Welcome to the server - Default username is \"%s\"", usernames[index]);
+                sprintf(server_message, "Server: Welcome to the server - Default username is \"%s\"", username);
                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                 sprintf(server_message, "Server: Use the /nick command to change your username");
                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
@@ -280,7 +291,7 @@ void processClients(int server_socket){
                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                 //Add client to the lobby room in active_users hash table
-                add_user(LOBBY_ROOM_ID, usernames[index], index, client_socket, ip_str, port); 
+                add_user(LOBBY_ROOM_ID, username, index, client_socket, ip_str, port); 
                 
                 //Print client joining message to the server's terminal
                 printf("**Client%lu on socket %d (%s:%hu) joined the server**\n", index, client_socket, ip_str, port);
@@ -292,7 +303,7 @@ void processClients(int server_socket){
         /* ----------------------------------------------------------------- */
         /* An event has occurred: Check all active clients in all chat rooms */
         /* ----------------------------------------------------------------- */
-        memset(message_recv, 0, sizeof(message_recv));
+        memset(message_recv, false, sizeof(message_recv));
         printf("\n");
         for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
 
@@ -300,14 +311,16 @@ void processClients(int server_socket){
             struct table_entry *user, *tmp;
             HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
 
-                printf("Process %s in room %d\n", user->id, room_id);
-
+                //Get index and username from user
                 size_t i = user->index;
+                strncpy(username, user->id, USERNAME_LENGTH);
 
+                //Check if user has already been processed
                 if(message_recv[i]){
-                    //User has already been processed
                     continue;
                 }
+
+                printf("Process %s in room %d\n", username, room_id);
 
                 if(socket_fds[i].revents & POLLIN){
 
@@ -324,7 +337,7 @@ void processClients(int server_socket){
                     }
 
                     //Mark user as processed
-                    message_recv[i] = 1;
+                    message_recv[i] = true;
 
                     if(recv_status == 0){
 
@@ -333,20 +346,17 @@ void processClients(int server_socket){
                         /* -------------------------- */
 
                         //Print message to server terminal
-                        printf("**%s in room #%d left the server**\n", usernames[i], room_id);
+                        printf("**%s in room #%d left the server**\n", username, room_id);
                     
                         //Print message to chat room
                         if(room_id != 0){
-                            sprintf(server_message, "Server: %s left the server", usernames[i]);
+                            sprintf(server_message, "Server: %s left the server", username);
                             sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                         }
                                                 
-                        //Remove username from hash table
+                        //Remove user from active_user hash table
                         delete_user(room_id, user);
                         
-                        //Revert username back to default
-                        snprintf(usernames[i], USERNAME_LENGTH, "Client%lu", i);
-
                         //Clear spam timeout and message count so new users using the same spot aren't affected
                         pthread_mutex_lock(&spam_lock);
                         spam_timeout[i] = 0;
@@ -393,7 +403,6 @@ void processClients(int server_socket){
                         //List who's in the current chat room
                         if(strncmp(client_message, "/who", 5) == 0){
                             //Setup "/who" command with the client's current room
-                            //char room[16];
                             client_message[4] = ' ';
                             client_message[5] = '\0';
                             sprintf(client_message, "%s%d", client_message, room_id);
@@ -404,7 +413,7 @@ void processClients(int server_socket){
                         if(strncmp(client_message, "/who ", 5) == 0){
                             
                             size_t who_message_length;
-                            char *message_prefix = "Server:";
+                            //char *message_prefix = "Server:";
 
                             //Check if argument after /who is valid
                             if(!isdigit(client_message[5])){
@@ -425,89 +434,114 @@ void processClients(int server_socket){
                                 continue;
                             }
 
-                            //Check if chat room has users
-                            int room_user_count = HASH_COUNT(active_users[targeted_room_id]);
-                            if(room_user_count == 0){
-                                sprintf(server_message, "Server: Room #%d is empty", targeted_room_id);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
-                            }
+                            //--------------------------------------------------------------------------------------------------------
 
                             //Check if the list of users needs to be rebuilt
                             if(who_message[targeted_room_id][0] == '\0'){
 
-                                //Allocate memory for the string of usernames
-                                //Add an additionl two bytes for MESSAGE_START character and ending null character                      
-                                who_message_length = 1 + strlen(message_prefix) + (room_user_count * USERNAME_LENGTH) + 1; 
-                                char *new_ptr = realloc(who_message[targeted_room_id], who_message_length);
-                                if(new_ptr == NULL){
-                                    fprintf(stderr, "Error allocating memory for who_message\n");
-                                    exit(0);
-                                }
-                                who_message[targeted_room_id] = new_ptr;
-
-                                //Insert MESSAGE_START character and copy message prefix
+                                //Insert MESSAGE_START character
                                 who_message[targeted_room_id][0] = MESSAGE_START;
-                                strcpy(who_message[targeted_room_id] + 1, message_prefix);
-                                                        
-                                //Itterate through the hash table and append usernames
-                                struct table_entry *s;
-                                for(s=active_users[targeted_room_id]; s != NULL; s=s->hh.next) {
-                                    strcat(who_message[targeted_room_id], " ");
-                                    strcat(who_message[targeted_room_id], s->id);
-                                }
+                                sprintf(who_message[targeted_room_id] + 1, "Server: Room #%d ", targeted_room_id);
+                                
+                                //Check if chat room has users
+                                int room_user_count = HASH_COUNT(active_users[targeted_room_id]);
+                                if(room_user_count == 0){
+                                    strcat(who_message[targeted_room_id], "is empty");
+                                }else{
 
+                                    strcat(who_message[targeted_room_id], "has;");
+                     
+                                    //Get who_message string length - Add extra 1 for null character
+                                    who_message_length = strlen(who_message[targeted_room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
+
+                                    //Allocate memory for the string if it's longer than initial allocated size
+                                    if(who_message_length > WHO_LENGTH){
+                                        printf("realloc to %lu\n", who_message_length);
+                                        char *new_ptr = realloc(who_message[targeted_room_id], who_message_length);
+                                        if(new_ptr == NULL){
+                                            fprintf(stderr, "Error allocating memory for who_message\n");
+                                            exit(0);
+                                        }
+                                        who_message[targeted_room_id] = new_ptr;
+                                    } 
+               
+                                    //Itterate through the hash table and append usernames
+                                    struct table_entry *s;
+                                    for(s=active_users[targeted_room_id]; s != NULL; s=s->hh.next) {
+                                        strcat(who_message[targeted_room_id], " ");
+                                        strcat(who_message[targeted_room_id], s->id);
+                                    }
+
+                                }
                             }
+
+                            //--------------------------------------------------------------------------------------------------------
+
 
                             //Send message containing current users in the specified room
                             sendMessage(client_socket, who_message[targeted_room_id], strlen(who_message[targeted_room_id]) + 1);
                             continue; 
                         }
 
-                        //Return the client's IP address and port
-                        if(strncmp(client_message, "/whois", 7) == 0){
-                            //Setup "/whois" command with the client's own username
-                            client_message[6] = ' ';
-                            client_message[7] = '\0';
-                            strcat(client_message, usernames[i]);
-                            //Fallthrough to the targeted /whois command
-                        }
+                        //Join the specified chat room
+                        if(strncmp(client_message, "/join", 5) == 0){
 
-                        //Return the targeted user's IP address and port
-                        if(strncmp(client_message, "/whois ", 7) == 0){
-
-                            char *target_username = client_message + 7;
-                            int target_username_length = strlen(target_username);
-                            if(target_username_length > USERNAME_LENGTH - 1){
-                                //Username is too long
-                                sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
+                            //Check if argument after /join is valid
+                            if(client_message[5] != ' ' || !isdigit(client_message[6])){
+                                sprintf(server_message, "Server: Enter a valid room number (0 to %d) after /join", MAX_ROOMS - 1);
                                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
-                            }
-
-                            target_username[0] = toupper(target_username[0]);
-
-                            struct table_entry *target = get_user(room_id, target_username);
-                            if(target == NULL){
-                                //Username does not exist
-                                sprintf(server_message, "Server: The user \"%s\" does not exist", target_username);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
+                                continue;    
                             }
                             
-                            if(strcmp(usernames[i],target_username) == 0){
-                                sprintf(server_message, "Server: Your address is %s:%d", target->ip, target->port);
-                            }else{
-                                sprintf(server_message, "Server: The address of \"%s\" is %s:%d", target_username, target->ip, target->port);
+                            //Get new room number from user
+                            char *new_room = client_message + 6;
+                            int new_room_id = atoi(new_room);
+
+                            //Check if chat room is valid
+                            if(new_room_id >= MAX_ROOMS || new_room_id < 0){
+                                sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 0 to %d)", MAX_ROOMS - 1);
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
                             }
+
+                            //Check if already in the room
+                            if(room_id == new_room_id){
+                                sprintf(server_message, "Server: You are already in room #%d", room_id);
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;                                
+                            }
+
+                            //Print client joining message to the server's terminal
+                            printf("**%s changed from room #%d to room #%d**\n", username, room_id, new_room_id);
+
+                            //Send message letting clients in new room know someone joined the room
+                            sprintf(server_message, "Server: User \"%s\" joined the chat room", username);
+                            sendMessageToAll(new_room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            
+                            //Move user to the new chat room
+                            add_user(new_room_id, username, user->index, user->socket_fd, user->ip, user->port);
+                            delete_user(room_id, user);
+
+                            //Send message letting clients in old chat room know someone changed rooms
+                            if(room_id != 0){
+                                sprintf(server_message, "Server: User \"%s\" switched to chat room #%d", username, new_room_id);
+                                sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            }
+                            
+                            //Send message to client who just joined the room
+                            sprintf(server_message, "Server: You have joined chat room #%d", new_room_id);
                             sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+
+                            //Set both room's who_message for rebuild
+                            who_message[room_id][0] = '\0';
+                            who_message[new_room_id][0] = '\0';
 
                             continue;
                         }
 
                         //Echo back the client's username
                         if(strncmp(client_message, "/nick", 6) == 0){
-                            sprintf(server_message, "Server: Your username is \"%s\"", usernames[i]);
+                            sprintf(server_message, "Server: Your username is \"%s\"", username);
                             sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
@@ -547,86 +581,22 @@ void processClients(int server_socket){
                             }                          
                             
                             //Print name change message to server's terminal
-                            printf("**%s on socket %d changed username to %s**\n", usernames[i], client_socket, new_name);
+                            printf("**%s on socket %d changed username to %s**\n", username, client_socket, new_name);
                             
                             //Send name change message to all clients if not in lobby
                             if(room_id != 0){
-                                sprintf(server_message, "Server: %s changed their name to %s", usernames[i], new_name);
+                                sprintf(server_message, "Server: %s changed their name to %s", username, new_name);
                                 sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             }else{
                                 sprintf(server_message, "Server: Your name has been changed to %s", new_name);
                                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);  
                             }
                             
-                            //Change username in hash table and array
+                            //Change username in active_users hash table
                             change_username(room_id, user, new_name);
-                            strcpy(usernames[i], new_name);
 
                             //Set who_message for rebuild
                             who_message[room_id][0] = '\0';
-
-                            continue;
-                        }
-
-                        //Join the specified chat room
-                        if(strncmp(client_message, "/join", 5) == 0){
-
-                            //Check if argument after /join is valid
-                            if(client_message[5] != ' ' || !isdigit(client_message[6])){
-                                sprintf(server_message, "Server: Enter a valid room number (0 to %d) after /join", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;    
-                            }
-                            
-                            //Get new room number from user
-                            char *new_room = client_message + 6;
-                            int new_room_id = atoi(new_room);
-
-                            //Check if chat room is valid
-                            if(new_room_id >= MAX_ROOMS || new_room_id < 0){
-                                sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 0 to %d)", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
-                            }
-
-                            //Check if already in the room
-                            if(room_id == new_room_id){
-                                sprintf(server_message, "Server: You are already in room #%d", room_id);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;                                
-                            }
-
-                            //Check if username is already in use in the new chat room
-                            if(get_user(new_room_id, usernames[i]) != NULL){
-                                sprintf(server_message, "Server: The username \"%s\" is currently being used in chat room #%d", usernames[i], new_room_id);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
-                            } 
-
-                            //Send message letting clients in new room know someone joined the room
-                            sprintf(server_message, "Server: User \"%s\" joined the chat room", usernames[i]);
-                            sendMessageToAll(new_room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
-
-                            //Change user to the new chat room
-                            add_user(new_room_id, user->id, user->index, user->socket_fd, user->ip, user->port);
-                            delete_user(room_id, user);
-
-                            //Send message letting clients in old chat room know someone changed rooms
-                            if(room_id != 0){
-                                sprintf(server_message, "Server: User \"%s\" switched to chat room #%d", usernames[i], new_room_id);
-                                sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                            }
-                            
-                            //Send message to client who just joined the room
-                            sprintf(server_message, "Server: You have joined chat room #%d", new_room_id);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-
-                            //Print client joining message to the server's terminal
-                            printf("**%s changed from room #%d to room #%d**\n", usernames[i], room_id, new_room_id);
-
-                            //Set both room's who_message for rebuild
-                            who_message[room_id][0] = '\0';
-                            who_message[new_room_id][0] = '\0';
 
                             continue;
                         }
@@ -655,12 +625,12 @@ void processClients(int server_socket){
                             }     
 
                             //Assume user is not on the server
-                            sprintf(server_message, "Server: User \"%s\" is currently not on the server", username);
+                            sprintf(server_message, "Server: \"%s\" is currently not on the server", username);
 
                             //Look for user and change the message if located
                             for(int i = 0; i < MAX_ROOMS; i++){
                                 if(get_user(i, username) != NULL){
-                                    sprintf(server_message, "Server: User \"%s\" is currently in chat room #%d", username, i);
+                                    sprintf(server_message, "Server: \"%s\" is currently in chat room #%d", username, i);
                                     break;
                                 }
                             }
@@ -669,6 +639,54 @@ void processClients(int server_socket){
                             sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                             continue;
+                        }
+
+                        //Return the client's IP address and port
+                        if(strncmp(client_message, "/whois", 7) == 0){
+                            //Setup "/whois" command with the client's own username
+                            client_message[6] = ' ';
+                            client_message[7] = '\0';
+                            strcat(client_message, username);
+                            //Fallthrough to the targeted /whois command
+                        }
+
+                        //Return the targeted user's IP address and port
+                        if(strncmp(client_message, "/whois ", 7) == 0){
+
+                            char *target_username = client_message + 7;
+                            int target_username_length = strlen(target_username);
+                            if(target_username_length > USERNAME_LENGTH - 1){
+                                //Username is too long
+                                sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
+                            target_username[0] = toupper(target_username[0]);
+
+                            struct table_entry *target = get_user(room_id, target_username);
+                            if(target == NULL){
+                                //Username does not exist
+                                sprintf(server_message, "Server: The user \"%s\" does not exist", target_username);
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+                            
+                            if(strcmp(target_username, username) == 0){
+                                sprintf(server_message, "Server: Your address is %s:%d", target->ip, target->port);
+                            }else{
+                                sprintf(server_message, "Server: The address of \"%s\" is %s:%d", target_username, target->ip, target->port);
+                            }
+                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+
+                            continue;
+                        }
+
+                        //Shutdown Server
+                        if(strncmp(client_message, "/die", 5) == 0){
+                            pthread_mutex_lock(&shutdown_lock);
+                            shutdown_server = true;
+                            pthread_mutex_unlock(&shutdown_lock);
                         }
 
                         sprintf(server_message, "Server: \"%s\" is not a valid command", client_message);
@@ -753,8 +771,8 @@ void processClients(int server_socket){
                             }
 
                             //Add sender's username to message
-                            message = addUsernameToMessage(message, usernames[i], "> ");
-                            size_t additional_length = strlen(usernames[i]) + 3; //Add three for 0x02 and "> "
+                            message = addUsernameToMessage(message, username, "> ");
+                            size_t additional_length = strlen(username) + 3; //Add three for 0x02 and "> "
         
                             //Send message to target user and sender
                             sendMessage(target_user->socket_fd, message, recv_status + additional_length);
@@ -780,8 +798,8 @@ void processClients(int server_socket){
                         /* ---------------------------------- */            
                         
                         //Add sender's username to message
-                        char *message = addUsernameToMessage(client_message, usernames[i], ": ");      
-                        size_t additional_length = strlen(usernames[i]) + 3; //Add three for 0x02 and ": "       
+                        char *message = addUsernameToMessage(client_message, username, ": ");      
+                        size_t additional_length = strlen(username) + 3; //Add three for 0x02 and ": "       
 
                         //Print client's message to server console
                         printTime();
@@ -802,22 +820,43 @@ void processClients(int server_socket){
                     }
                 }
             }
-
         }
-        
+
+        pthread_mutex_lock(&shutdown_lock);
+        if(shutdown_server){
+            pthread_mutex_unlock(&shutdown_lock);
+            break;
+        }
+        pthread_mutex_unlock(&shutdown_lock);
+
     }
 
+    /* -------------------- */
+    /* Shutting down server */
+    /* -------------------- */
+
+    //Free who_message strings
     for(int i = 0; i < MAX_ROOMS; i++){
         free(who_message[i]);
+    }
+
+    //Clost client sockets and delete/free users in hash table
+    struct table_entry *user, *tmp;
+    for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
+        HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
+            status = close(user->socket_fd);
+            checkStatus(status, "Error closing client socket");
+            delete_user(room_id, user);
+        }
     }
 
 }
 
 int sendMessage(int socket, char *message, int message_length){
 
-    int bytes_sent;
+    int bytes_sent = 0;
 
-    do{
+    while(message_length){
         bytes_sent = send(socket, message, message_length, 0);
         if(bytes_sent == -1){
             fprintf(stderr, "Error sending message to socket %d: %s\n", socket, strerror(errno));
@@ -825,7 +864,7 @@ int sendMessage(int socket, char *message, int message_length){
         }
         message += bytes_sent; //Point to the remaining portion that was not sent
         message_length -= bytes_sent; //Calculate the remaining bytes to be sent
-    }while(message_length);
+    }
 
     return bytes_sent;
 }
