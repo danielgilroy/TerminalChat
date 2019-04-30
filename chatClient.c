@@ -31,7 +31,7 @@ int main(){
 
     initializeChat();
     initializeConnection();
-    
+        
     //Setup signal handler and create thread for incoming messages
     signal(SIGUSR1, handler);
     pthread_create(&tid, NULL, incomingMessages, NULL);
@@ -69,11 +69,11 @@ void initializeConnection(){
     int recv_status;
     char response[MESSAGE_LENGTH];
 
-    recv_status = joinServer(response);
+    recv_status = joinServer(response);    
 
     if (recv_status < 0){
-        wprintw(chat_win, "\n -There was an error connecting to the server-\n");
-        wprintw(chat_win, "    -The chat client will close shortly-\n");
+        wprintw(chat_win, "\n\n    -There was an error connecting to the server-\n");
+        wprintw(chat_win, "        -The chat client will close shortly-\n");
         wrefresh(chat_win);
         sleep(3);
         terminateChat();
@@ -109,22 +109,22 @@ void *incomingMessages(){
         recv_status = receiveMessage(server_message, MESSAGE_LENGTH);
     
         if(recv_status == 0){
-            wprintw(chat_win, "\n   -The connection to the server has been lost-\n");
-            wprintw(chat_win, "       -The chat client will close shortly-\n");
+            wprintw(chat_win, "\n\n       -The connection to the server has been lost-\n");
+            wprintw(chat_win, "          -Type /quit to close the chat client-\n");
             wrefresh(chat_win);
-            sleep(3);
-            terminateChatNow();  
+            return NULL;  
         }else if(recv_status == -1){
-            wprintw(chat_win, "\n      -There was an error-\n");
-            wprintw(chat_win, " -The chat client will close shortly-\n");
+            wprintw(chat_win, "\n\n  -An unknown error has occurred-\n");
+            wprintw(chat_win, "-The chat client will close shortly-\n");
             wrefresh(chat_win);
-            sleep(3);
+            sleep(5);
             terminateChatNow();  
         }
 
-        /* Debug print */
-        //wprintw(chat_win, "Received %d characters\n", status);
-        /* ----------- */
+        static int k = 0;
+        //wprintw(chat_win, "\nRECV %d", k);
+        k++;
+        wrefresh(chat_win); 
 
         printToChat(server_message, recv_status);
     }
@@ -208,7 +208,7 @@ void outgoingMessages(){
         wrefresh(chat_win);
         wrefresh(stdscr);
 
-    }while(strcmp(user_message, "/exit") && strcmp(user_message, "/quit"));
+    }while(strcmp(user_message, "/q") && strcmp(user_message, "/quit") && strcmp(user_message, "/exit"));
   
     wprintw(chat_win, "\n -Leaving chat server-\n");
     wrefresh(chat_win); 

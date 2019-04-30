@@ -18,7 +18,7 @@ int network_socket;
 
 int joinServer(char *response){
 
-    int recv_status;
+    int status;
     //char server_response[MESSAGE_LENGTH];
 
     //Specify an address and port for the socket to use
@@ -37,19 +37,19 @@ int joinServer(char *response){
     checkStatus(network_socket);
 
     //Perform the connection using the socket and address struct
-    recv_status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
+    status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
     
     //Check for error with the connection
-    if(recv_status){
+    if(status){
         closeSocket(network_socket);
-        return recv_status;
+        return status;
     }
 
     //Recieve welcome message from the server
-    recv_status = recv(network_socket, response, MESSAGE_LENGTH, 0);
-    checkStatus(recv_status);
+    status = recv(network_socket, response, MESSAGE_LENGTH, 0);
+    checkStatus(status);
 
-    return recv_status;
+    return status;
 }
 
 int receiveMessage(char *message, int message_length){
