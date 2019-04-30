@@ -30,6 +30,15 @@
 #define SPAM_INTERVAL_WINDOW 10 //Interval window (in seconds) for max message limit
 #define SPAM_TIMEOUT_LENGTH 20 //Timeout period (in seconds) for detected spammer to wait
 
+struct table_entry{
+    char id[USERNAME_LENGTH];  /* key */
+    size_t index;
+    int socket_fd;
+    char ip[INET_ADDRSTRLEN];
+    unsigned short port;
+    UT_hash_handle hh;         /* makes this structure hashable */
+};
+
 void initializeServer();
 void *spamFilter();
 void processClients(int);
@@ -40,25 +49,18 @@ void printTime();
 int checkStatus(int, char *);
 int is_username_valid(char *, char *);
 int is_username_restricted(char *, char *);
+void rebuild_who_message(char **, int);
+void remove_user(int, struct table_entry *);
 void add_user(int, char *, size_t, int, char *, unsigned short);
 struct table_entry *get_user(int, char *);
 void change_username(int, struct table_entry *, char *);
 void delete_user(int, struct table_entry *);
 int id_compare(struct table_entry *, struct table_entry *);
 
-struct pollfd socket_fds[MAX_SOCKETS]; //Memset me ------------------------------------------------------------------------------------
+struct pollfd socket_fds[MAX_SOCKETS];
 int socket_count = 0;
 bool shutdown_server = false;
 pthread_mutex_t shutdown_lock;
-
-struct table_entry{
-    char id[USERNAME_LENGTH];                    /* key */
-    size_t index;
-    int socket_fd;
-    char ip[INET_ADDRSTRLEN];
-    unsigned short port;
-    UT_hash_handle hh;         /* makes this structure hashable */
-};
 
 struct table_entry *active_users[MAX_ROOMS] = {NULL, }; 
 
@@ -111,12 +113,15 @@ void initializeServer(){
     status = listen(server_socket, LISTEN_BACKLOG);
     checkStatus(status, "Error listening on server socket");
 
-    //Initialize server file descriptor
+    //Initialize struct pollfd array to zeros
+    memset(socket_fds, 0, sizeof(socket_fds));
+
+    //Set server file descriptor and event type
     socket_fds[0].fd = server_socket;
     socket_fds[0].events = POLLIN;
     socket_count++;
 
-    //Initialize client file descriptors
+    //Set ignore state for client file descriptors and event type
     for(size_t i = 1; i < MAX_SOCKETS; i++){
         socket_fds[i].fd = -1;
         socket_fds[i].events = POLLIN;
@@ -257,9 +262,9 @@ void processClients(int server_socket){
                     continue;
                 }
 
-                //Increment socket count and set who_message for rebuild
+                //Increment socket count and set lobby who_message for rebuild
                 socket_count++;
-                who_message[0][0] = '\0';
+                who_message[LOBBY_ROOM_ID][0] = '\0';
                 
                 //Set client socket to nonblocking
                 flags = fcntl(client_socket, F_GETFL);
@@ -282,16 +287,16 @@ void processClients(int server_socket){
                 //Create client's default username
                 sprintf(username, "Client%zu", index);
 
+                //Add client to the lobby room in active_users hash table
+                add_user(LOBBY_ROOM_ID, username, index, client_socket, ip_str, port);
+
                 //Send server welcome messages to client
                 sprintf(server_message, "Server: Welcome to the server - Default username is \"%s\"", username);
                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                 sprintf(server_message, "Server: Use the /nick command to change your username");
                 sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                 sprintf(server_message, "Server: Use the /join command to join a chat room");
-                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-
-                //Add client to the lobby room in active_users hash table
-                add_user(LOBBY_ROOM_ID, username, index, client_socket, ip_str, port); 
+                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
                 
                 //Print client joining message to the server's terminal
                 printf("**Client%lu on socket %d (%s:%hu) joined the server**\n", index, client_socket, ip_str, port);
@@ -320,7 +325,9 @@ void processClients(int server_socket){
                     continue;
                 }
 
+                /* DEBUG STATEMENT */
                 printf("Process %s in room %d\n", username, room_id);
+                /* --------------- */
 
                 if(socket_fds[i].revents & POLLIN){
 
@@ -349,27 +356,13 @@ void processClients(int server_socket){
                         printf("**%s in room #%d left the server**\n", username, room_id);
                     
                         //Print message to chat room
-                        if(room_id != 0){
-                            sprintf(server_message, "Server: %s left the server", username);
-                            sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                        }
-                                                
-                        //Remove user from active_user hash table
-                        delete_user(room_id, user);
-                        
-                        //Clear spam timeout and message count so new users using the same spot aren't affected
-                        pthread_mutex_lock(&spam_lock);
-                        spam_timeout[i] = 0;
-                        spam_message_count[i] = 0;
-                        pthread_mutex_unlock(&spam_lock);
+                        sprintf(server_message, "Server: %s left the server", username);
+                        sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
-                        //Close the client socket
-                        status = close(client_socket);
-                        checkStatus(status, "Error closing client socket");
+                        //Remove client entry from server
+                        remove_user(room_id, user);
 
-                        //Set FD to ignore state, decrement socket count, and set who_message for rebuild
-                        socket_fds[i].fd = -1;
-                        socket_count--;
+                        //Set who_message for rebuild
                         who_message[room_id][0] = '\0';
 
                         continue;
@@ -401,20 +394,30 @@ void processClients(int server_socket){
                     if(client_message[0] == '/'){
         
                         //List who's in the current chat room
-                        if(strncmp(client_message, "/who", 5) == 0){
+                        /*if(strncmp(client_message, "/who", 5) == 0){
                             //Setup "/who" command with the client's current room
                             client_message[4] = ' ';
                             client_message[5] = '\0';
                             sprintf(client_message, "%s%d", client_message, room_id);
                             //Fallthrough to the targeted /who command
+                        }*/
+                        if(strncmp(client_message, "/who", 5) == 0){
+                        
+                            for(int i = 0; i < MAX_ROOMS; i++){
+                                //Rebuild who_message strings if necessary
+                                rebuild_who_message(who_message, i);
+
+                                //Send message containing current users in room #i
+                                sendMessage(client_socket, who_message[i], strlen(who_message[i]) + 1);
+                                sleep(0.5);
+                            }
+
+                            continue;
                         }
 
                         //List who's in the specified chat room
                         if(strncmp(client_message, "/who ", 5) == 0){
                             
-                            size_t who_message_length;
-                            //char *message_prefix = "Server:";
-
                             //Check if argument after /who is valid
                             if(!isdigit(client_message[5])){
                                 sprintf(server_message, "Server: Enter a valid room number (1 to %d) after /who", MAX_ROOMS - 1);
@@ -426,7 +429,6 @@ void processClients(int server_socket){
                             char *targeted_room = client_message + 5;
                             int targeted_room_id = atoi(targeted_room);
                             
-
                             //Check if chat room is valid
                             if(targeted_room_id >= MAX_ROOMS || targeted_room_id <= 0){
                                 sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 1 to %d)", MAX_ROOMS - 1);
@@ -434,49 +436,8 @@ void processClients(int server_socket){
                                 continue;
                             }
 
-                            //--------------------------------------------------------------------------------------------------------
-
-                            //Check if the list of users needs to be rebuilt
-                            if(who_message[targeted_room_id][0] == '\0'){
-
-                                //Insert MESSAGE_START character
-                                who_message[targeted_room_id][0] = MESSAGE_START;
-                                sprintf(who_message[targeted_room_id] + 1, "Server: Room #%d ", targeted_room_id);
-                                
-                                //Check if chat room has users
-                                int room_user_count = HASH_COUNT(active_users[targeted_room_id]);
-                                if(room_user_count == 0){
-                                    strcat(who_message[targeted_room_id], "is empty");
-                                }else{
-
-                                    strcat(who_message[targeted_room_id], "has;");
-                     
-                                    //Get who_message string length - Add extra 1 for null character
-                                    who_message_length = strlen(who_message[targeted_room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
-
-                                    //Allocate memory for the string if it's longer than initial allocated size
-                                    if(who_message_length > WHO_LENGTH){
-                                        printf("realloc to %lu\n", who_message_length);
-                                        char *new_ptr = realloc(who_message[targeted_room_id], who_message_length);
-                                        if(new_ptr == NULL){
-                                            fprintf(stderr, "Error allocating memory for who_message\n");
-                                            exit(0);
-                                        }
-                                        who_message[targeted_room_id] = new_ptr;
-                                    } 
-               
-                                    //Itterate through the hash table and append usernames
-                                    struct table_entry *s;
-                                    for(s=active_users[targeted_room_id]; s != NULL; s=s->hh.next) {
-                                        strcat(who_message[targeted_room_id], " ");
-                                        strcat(who_message[targeted_room_id], s->id);
-                                    }
-
-                                }
-                            }
-
-                            //--------------------------------------------------------------------------------------------------------
-
+                            //Rebuild who_message strings if necessary
+                            rebuild_who_message(who_message, targeted_room_id);
 
                             //Send message containing current users in the specified room
                             sendMessage(client_socket, who_message[targeted_room_id], strlen(who_message[targeted_room_id]) + 1);
@@ -523,10 +484,8 @@ void processClients(int server_socket){
                             delete_user(room_id, user);
 
                             //Send message letting clients in old chat room know someone changed rooms
-                            if(room_id != 0){
                                 sprintf(server_message, "Server: User \"%s\" switched to chat room #%d", username, new_room_id);
                                 sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                            }
                             
                             //Send message to client who just joined the room
                             sprintf(server_message, "Server: You have joined chat room #%d", new_room_id);
@@ -567,10 +526,10 @@ void processClients(int server_socket){
 
 
                             //Check if username is already in use on the server
-                            int name_in_use = 0;
+                            bool name_in_use = false;
                             for(int i = 0; i < MAX_ROOMS; i++){
                                 if(get_user(i, new_name) != NULL){
-                                    name_in_use = 1;
+                                    name_in_use = true;
                                     break;
                                 }
                             }
@@ -584,7 +543,7 @@ void processClients(int server_socket){
                             printf("**%s on socket %d changed username to %s**\n", username, client_socket, new_name);
                             
                             //Send name change message to all clients if not in lobby
-                            if(room_id != 0){
+                            if(room_id != LOBBY_ROOM_ID){
                                 sprintf(server_message, "Server: %s changed their name to %s", username, new_name);
                                 sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             }else{
@@ -611,11 +570,8 @@ void processClients(int server_socket){
                         //Return the room number that has the user
                         if(strncmp(client_message, "/where ", 7) == 0){
 
-                            //Get username from client's message
-                            char *username = NULL;
-                            username = client_message + 7;
-
-                            //Force the first letter to be uppercase
+                            //Get username from message and force first letter to uppercase
+                            char *username = client_message + 7;
                             username[0] = toupper(username[0]);
 
                             //Check if the username is valid
@@ -682,7 +638,73 @@ void processClients(int server_socket){
                             continue;
                         }
 
-                        //Shutdown Server
+                        //Kick specified user from the server
+                        if(strncmp(client_message, "/kick ", 6) == 0){
+                           
+                            //Get username from message and force first letter to uppercase
+                            char *targeted_username = client_message + 6;
+                            targeted_username[0] = toupper(targeted_username[0]);
+
+                            //Check if the username is valid
+                            if(!is_username_valid(targeted_username, server_message)){
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
+                            //Prevent client from kicking themself
+                            if(strcmp(username, targeted_username) == 0){
+                                sprintf(server_message, "Server: Using /kick on yourself is restricted");
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
+                            //Look for user and perform the kick if located
+                            int targeted_room;
+                            struct table_entry *targeted_user;
+                            for(targeted_room = 0; targeted_room < MAX_ROOMS; targeted_room++){
+                                if((targeted_user = get_user(targeted_room, targeted_username)) != NULL){
+
+                                    //Get tmp's hh.next for hash table itteration if removing tmp
+                                    if(tmp == targeted_user){
+                                        tmp = tmp->hh.next; //Avoids accessing removed user
+                                    }
+
+                                    //Inform targeted_user that they have been kicked
+                                    sprintf(server_message, "Server: You have been kicked from the server");
+                                    sendMessage(targeted_user->socket_fd, server_message_prefixed, strlen(server_message_prefixed) + 1);
+
+                                    //Remove client entry from server
+                                    remove_user(targeted_room, targeted_user);
+
+                                    //Set who_message for rebuild
+                                    who_message[targeted_room][0] = '\0';
+
+                                    break;
+                                }
+                            }
+
+                            if(targeted_user != NULL){
+                                //Print kick message to server's terminal
+                                printf("**%s in room #%d kicked from the server**\n", targeted_username, targeted_room);
+
+                                //Inform the chat room about the kick
+                                sprintf(server_message, "Server: \"%s\" has been kicked from the server", targeted_username);
+                                sendMessageToAll(targeted_room, server_message_prefixed, strlen(server_message_prefixed) + 1);
+
+                                //Also inform client if they are in a different room or the lobby
+                                if(room_id != targeted_room || targeted_room == LOBBY_ROOM_ID){
+                                    sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                }
+                            }else{
+                                //Inform client that user was not found
+                                sprintf(server_message, "Server: \"%s\" is currently not on the server", targeted_username);
+                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            }
+                            
+                            continue;
+                        }
+
+                        //Trigger server shutdown
                         if(strncmp(client_message, "/die", 5) == 0){
                             pthread_mutex_lock(&shutdown_lock);
                             shutdown_server = true;
@@ -786,7 +808,7 @@ void processClients(int server_socket){
                         }
 
                         //Don't send public messages to lobby room
-                        if(room_id == 0){
+                        if(room_id == LOBBY_ROOM_ID){
                             sprintf(server_message, "Server: You're not in a chat room - Use the /join command");
                             sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
@@ -870,6 +892,11 @@ int sendMessage(int socket, char *message, int message_length){
 }
 
 int sendMessageToAll(int room_id, char *message, int message_length){
+
+    //Prevent messages from being sent to everyone in the lobby room
+    if(room_id == LOBBY_ROOM_ID){
+        return -1;
+    }
 
     int status = 0;
     struct table_entry *s;
@@ -958,6 +985,73 @@ int is_username_restricted(char *username, char *error_message){
     }
 
     return 1;
+}
+
+void rebuild_who_message(char** who_message, int room_id){
+
+    size_t who_message_length;
+
+    //Check if the list of users needs to be rebuilt
+    if(who_message[room_id][0] == '\0'){
+
+        //Insert MESSAGE_START character
+        who_message[room_id][0] = MESSAGE_START;
+        sprintf(who_message[room_id] + 1, "Server: Room #%d ", room_id);
+        
+        //Check if chat room has users
+        int room_user_count = HASH_COUNT(active_users[room_id]);
+        if(room_user_count == 0){
+            strcat(who_message[room_id], "is empty");
+        }else{
+
+            strcat(who_message[room_id], "has;");
+
+            //Get who_message string length - Add extra 1 for null character
+            who_message_length = strlen(who_message[room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
+
+            //Allocate memory for the string if it's longer than initial allocated size
+            if(who_message_length > WHO_LENGTH){
+                printf("realloc to %lu\n", who_message_length);
+                char *new_ptr = realloc(who_message[room_id], who_message_length);
+                if(new_ptr == NULL){
+                    fprintf(stderr, "Error allocating memory for who_message\n");
+                    exit(0);
+                }
+                who_message[room_id] = new_ptr;
+            } 
+
+            //Itterate through the hash table and append usernames
+            struct table_entry *s;
+            for(s=active_users[room_id]; s != NULL; s = s->hh.next) {
+                strcat(who_message[room_id], " ");
+                strcat(who_message[room_id], s->id);
+            }
+
+        }
+    }
+
+}
+
+void remove_user(int room_id, struct table_entry *user){
+
+    int i = user->index;
+    
+    //Clear spam timeout and message count so new users using the same spot aren't affected
+    pthread_mutex_lock(&spam_lock);
+    spam_timeout[i] = 0;
+    spam_message_count[i] = 0;
+    pthread_mutex_unlock(&spam_lock);
+
+    //Close the client socket
+    checkStatus(close(user->socket_fd), "Error closing client socket");
+
+    //Set FD to ignore state, decrement socket count, and set who_message for rebuild
+    socket_fds[i].fd = -1;
+    socket_count--;
+
+    //Remove user from active_user hash table
+    delete_user(room_id, user);
+
 }
 
 void add_user(int room_id, char *username, size_t index, int client_fd, char *ip, unsigned short port){
