@@ -97,6 +97,8 @@ void start_server(){
 
     int status;
     int flags;
+    char query[QUERY_LENGTH];
+    char *error_message = NULL;
 
     //Define the server's IP address and port
     struct sockaddr_in server_address;
@@ -144,9 +146,18 @@ void start_server(){
 
     //Open database of registered users
     status = sqlite3_open("users.db", &user_db);
-    if(status){
+    if(status != SQLITE_OK){
         fprintf(stderr, "Error opening database: %s\n", sqlite3_errmsg(user_db));
         sqlite3_close(user_db);
+    }
+
+    //Check if "users" table exists in the database     
+    sprintf(query, "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);");
+    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+    if(status != SQLITE_OK){
+        //Print SQL error to the server terminal
+        fprintf(stderr, "SQL query error: %s\n", error_message);
+        sqlite3_free(error_message);
     }
 
     //Call method for processing clients
@@ -218,7 +229,7 @@ void process_clients(int server_socket){
     char server_message_prefixed[MESSAGE_LENGTH];
     char *server_message = server_message_prefixed + 1;
     char *who_message[MAX_ROOMS] = {NULL, };
-    char query[MESSAGE_LENGTH];
+    char query[QUERY_LENGTH];
 
     //Add control character to the start of message so we know when it's a
     //new message since the message may be split up over multiple packets
@@ -328,12 +339,11 @@ void process_clients(int server_socket){
             }
         }
 
-
         /* ----------------------------------------------------------------- */
         /* An event has occurred: Check all active clients in all chat rooms */
         /* ----------------------------------------------------------------- */
         memset(message_recv, false, sizeof(message_recv));
-        printf("\n");
+        //printf("\n");
         for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
 
             //Itterate through all users in the chat room
@@ -350,7 +360,7 @@ void process_clients(int server_socket){
                 }
 
                 /* DEBUG STATEMENT */
-                printf("Process %s in room %d\n", username, room_id);
+                //printf("Process %s in room %d\n", username, room_id);
                 /* --------------- */
 
                 if(socket_fds[i].revents & POLLIN){
@@ -788,6 +798,7 @@ void process_clients(int server_socket){
                             char *password = NULL;
                             char *password2 = NULL;
                             char *error_message = NULL;
+                            char *has_result = NULL;
 
                             //Get username and passwords from client's message
                             get_username_and_passwords(10, client_message, &new_name, &password, &password2);
@@ -804,20 +815,27 @@ void process_clients(int server_socket){
                                 continue;  
                             }
 
-                            //Register username into user database
-                            sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', '%s');", new_name, password, "user");
-                            status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+                            //Check if username already exists in database
+                            sprintf(query, "SELECT id FROM users WHERE id = '%s';", new_name);
+                            status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
                             if(status != SQLITE_OK){
-                                /* DEBUG PRINT */
                                 fprintf(stderr, "SQL query error: %s\n", error_message);
-                                /* ----------- */
                                 sqlite3_free(error_message);
-
+                                continue;
+                            }
+                            if(has_result != NULL){
+                                
                                 //Check if client is logged in as the registered database user
                                 if(strcmp(username, new_name) == 0){
 
                                     //Change password for the registered user
-                                    //-----------------------------------------------------------------------------------------------------------------------------
+                                    sprintf(query, "UPDATE users SET password = '%s' WHERE id = '%s';", password, username);
+                                    status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
+                                    if(status != SQLITE_OK){
+                                        fprintf(stderr, "SQL query error: %s\n", error_message);
+                                        sqlite3_free(error_message);
+                                        continue;
+                                    }
 
                                     //Print password change message to server's terminal
                                     printf("**%s on socket %d changed their password**\n", username, client_socket);
@@ -825,6 +843,7 @@ void process_clients(int server_socket){
                                     //Inform client of password change
                                     sprintf(server_message, "Server: Your username password has been changed");
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+
                                 }else{
                                     //Inform client of username already being registered
                                     sprintf(server_message, "Server: The username \"%s\" is already registered", new_name);
@@ -832,12 +851,23 @@ void process_clients(int server_socket){
                                 }
 
                             }else{
-                                //Print username registration message to server's terminal
-                                printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
 
-                                //Inform client of username registration
-                                sprintf(server_message, "Server: You have registered the username \"%s\"", new_name);
-                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                //Register username into database if it doesn't already exist
+                                sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', '%s');", new_name, password, "user");
+                                status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
+                                if(status != SQLITE_OK){
+                                    fprintf(stderr, "SQL query error: %s\n", error_message);
+                                    sqlite3_free(error_message);
+                                    continue;
+                                }else{
+                                    //Print username registration message to server's terminal
+                                    printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
+
+                                    //Inform client of username registration
+                                    sprintf(server_message, "Server: You have registered the username \"%s\"", new_name);
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                }
+
                             }
 
                             continue;
@@ -943,7 +973,6 @@ void process_clients(int server_socket){
 
                             free(message);
                             continue;
-
                         }
 
                         //Inform client they aren't in a chat room
@@ -969,7 +998,7 @@ void process_clients(int server_socket){
                         //Send message to all clients
                         send_message_to_all(room_id, message, recv_status + additional_length);
 
-                        //Send load test
+                        //SEND LOAD TEST//
                         /*send_message_to_all(message, recv_status + additional_length);
                         send_message_to_all(message, recv_status + additional_length);
                         send_message_to_all(message, recv_status + additional_length);
@@ -1000,7 +1029,7 @@ void process_clients(int server_socket){
         free(who_message[i]);
     }
 
-    //Clost client sockets and delete/free users in hash table
+    //Close client sockets and delete/free users in hash table
     struct table_entry *user, *tmp;
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
@@ -1009,7 +1038,6 @@ void process_clients(int server_socket){
             delete_user(room_id, user);
         }
     }
-
 }
 
 int send_message(int socket, char *message, int message_length){
@@ -1116,7 +1144,6 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
             (*password2)++;
         }
     }
-
 }
 
 int is_password_valid(char *password, char *error_message){
@@ -1126,13 +1153,11 @@ int is_password_valid(char *password, char *error_message){
         sprintf(error_message, "Server: Password is too long (max %d characters)", PASSWORD_LENGTH_MAX - 1);
         return 0;
     }
-                        
     //Check if password has any whitespace
     if(strpbrk(password, " \t\n\v\f\r")){
         sprintf(error_message, "Server: Passwords with spaces are restricted");
         return 0;                            
     }
-
     //Check if password is too short
     if(memchr(password, '\0', PASSWORD_LENGTH_MIN)){
         sprintf(error_message, "Server: Password is too short (min %d characters)", PASSWORD_LENGTH_MIN);
@@ -1148,16 +1173,15 @@ int are_passwords_valid(char *password, char *password2, char *error_message){
     if(!is_password_valid(password, error_message)){
         return 0;
     }
-    
-    //Check if password2 is valid
+    //Check if password2 exists
     if(password2 == NULL){
         sprintf(error_message, "Server: The entered command requires the password be repeated");
         return 0;
     }
+    //Check if password2 is valid
     if(!is_password_valid(password2, error_message)){
         return 0;
     }
-
     //Check is both passwords match
     if(strcmp(password, password2) != 0){
         sprintf(error_message, "Server: The two entered passwords do not match");
@@ -1174,19 +1198,16 @@ int is_username_valid(char *username, char *error_message){
         sprintf(error_message, "Server: The entered command requires a username");
         return 0;
     }
-
     //Check if username is too long
     if(!memchr(username, '\0', 16)){
         sprintf(error_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
         return 0;
-    }
-                        
+    }                   
     //Check if username has any whitespace
     if(strpbrk(username, " \t\n\v\f\r")){
         sprintf(error_message, "Server: Usernames with spaces are restricted");
         return 0;                            
     }
-
     //Check if username is blank
     if(strcmp(username, "") == 0){
         sprintf(error_message, "Server: Blank usernames are restricted");
@@ -1253,7 +1274,6 @@ void rebuild_who_message(char** who_message, int room_id){
 
         }
     }
-
 }
 
 void remove_user(int room_id, struct table_entry *user){
@@ -1275,7 +1295,6 @@ void remove_user(int room_id, struct table_entry *user){
 
     //Remove user from active_user hash table
     delete_user(room_id, user);
-
 }
 
 void add_user(int room_id, char *username, size_t index, int client_fd, char *ip, unsigned short port){
@@ -1315,9 +1334,9 @@ int id_compare(struct table_entry *a, struct table_entry *b){
 }
 
 static int callback(void *result, int argc, char **argv, char **azColName){
-    for(int i = 0; i < argc; i++){
+    /*for(int i = 0; i < argc; i++){
       printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
-    }
+    }*/
     *((char **) result) = strdup(argv[0] ? argv[0] : "NULL");
     return 0;
 }
