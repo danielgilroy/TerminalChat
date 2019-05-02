@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <sqlite3.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -23,7 +24,10 @@
 #define MAX_ROOMS 11
 #define LOBBY_ROOM_ID 0
 #define USERNAME_LENGTH 16
+#define PASSWORD_LENGTH_MAX 16
+#define PASSWORD_LENGTH_MIN 4
 #define WHO_LENGTH 64
+#define QUERY_LENGTH 128
 #define MESSAGE_LENGTH 256
 #define MESSAGE_START 0x02 //Start of Text control character
 #define SPAM_MESSAGE_LIMIT 10 //Max messages within spam interval window
@@ -39,14 +43,17 @@ struct table_entry{
     UT_hash_handle hh;         /* makes this structure hashable */
 };
 
-void initializeServer();
-void *spamFilter();
-void processClients(int);
-int sendMessage(int, char *, int);
-int sendMessageToAll(int, char *, int);
-char *addUsernameToMessage(char *, char *, char *);
-void printTime();
-int checkStatus(int, char *);
+void start_server();
+void *spam_filter();
+void process_clients(int);
+int send_message(int, char *, int);
+int send_message_to_all(int, char *, int);
+char *add_username_to_message(char *, char *, char *);
+void print_time();
+int check_status(int, char *);
+void get_username_and_passwords(int, char *, char **, char **, char **);
+int is_password_valid(char *, char *);
+int are_passwords_valid(char *, char *, char *);
 int is_username_valid(char *, char *);
 int is_username_restricted(char *, char *);
 void rebuild_who_message(char **, int);
@@ -56,6 +63,7 @@ struct table_entry *get_user(int, char *);
 void change_username(int, struct table_entry *, char *);
 void delete_user(int, struct table_entry *);
 int id_compare(struct table_entry *, struct table_entry *);
+static int callback(void *, int, char **, char **);
 
 struct pollfd socket_fds[MAX_SOCKETS];
 int socket_count = 0;
@@ -68,12 +76,15 @@ short spam_message_count[MAX_SOCKETS]; //Spam message counters for each client
 short spam_timeout[MAX_SOCKETS]; //Spam timeout for each client
 pthread_mutex_t spam_lock;
 
+sqlite3 *user_db;
+
 int main(){
 
     printf("**Starting Server**\n");
     pthread_mutex_init(&shutdown_lock, NULL);
     pthread_mutex_init(&spam_lock, NULL);
-    initializeServer();
+    
+    start_server();
 
     printf("**Shutting Down Server**\n");
     pthread_mutex_destroy(&shutdown_lock);
@@ -82,7 +93,7 @@ int main(){
     return 0;
 }
 
-void initializeServer(){
+void start_server(){
 
     int status;
     int flags;
@@ -97,21 +108,21 @@ void initializeServer(){
     //Create the server socket to use for a connection
     int server_socket;
     server_socket = socket(PF_INET, SOCK_STREAM, 0);
-    checkStatus(server_socket, "Error creating server socket");
+    check_status(server_socket, "Error creating server socket");
 
     //Set server socket to nonblocking
     flags = fcntl(server_socket, F_GETFL, NULL);
-    checkStatus(flags, "Error getting flags for server socket");
+    check_status(flags, "Error getting flags for server socket");
     status = fcntl(server_socket, F_SETFL, flags | O_NONBLOCK);
-    checkStatus(status, "Error setting server socket to nonblocking");
+    check_status(status, "Error setting server socket to nonblocking");
 
     //Bind the socket to our specified IP address and port
     status = bind(server_socket, (struct sockaddr*) &server_address, sizeof(server_address));
-    checkStatus(status, "Error binding server socket");
+    check_status(status, "Error binding server socket");
 
     //Set the socket up to listen for connections
     status = listen(server_socket, LISTEN_BACKLOG);
-    checkStatus(status, "Error listening on server socket");
+    check_status(status, "Error listening on server socket");
 
     //Initialize struct pollfd array to zeros
     memset(socket_fds, 0, sizeof(socket_fds));
@@ -129,22 +140,34 @@ void initializeServer(){
 
     //Create thread for spam filter
     pthread_t spam_tid;
-    pthread_create(&spam_tid, NULL, spamFilter, NULL);
+    pthread_create(&spam_tid, NULL, spam_filter, NULL);
+
+    //Open database of registered users
+    status = sqlite3_open("users.db", &user_db);
+    if(status){
+        fprintf(stderr, "Error opening database: %s\n", sqlite3_errmsg(user_db));
+        sqlite3_close(user_db);
+    }
 
     //Call method for processing clients
-    processClients(server_socket);
+    process_clients(server_socket);
 
     //Wait for thread to finish
     pthread_join(spam_tid, NULL);
 
     //Close the server socket
-    printf("**Closing server socket**\n");
     status = close(server_socket);
-    checkStatus(status, "Error closing server socket");
+    check_status(status, "Error closing server socket");
+
+    //Close database of registered users
+    status = sqlite3_close(user_db);
+    if(status != SQLITE_OK){
+        fprintf(stderr, "Error closing database: %s\n", sqlite3_errmsg(user_db));
+    }
 
 }
 
-void *spamFilter(){
+void *spam_filter(){
 
     int current_interval = 0; //Current interval within spam interval window
 
@@ -183,7 +206,7 @@ void *spamFilter(){
     return NULL;
 }
 
-void processClients(int server_socket){
+void process_clients(int server_socket){
 
     int status, flags;
     int recv_status;
@@ -195,6 +218,7 @@ void processClients(int server_socket){
     char server_message_prefixed[MESSAGE_LENGTH];
     char *server_message = server_message_prefixed + 1;
     char *who_message[MAX_ROOMS] = {NULL, };
+    char query[MESSAGE_LENGTH];
 
     //Add control character to the start of message so we know when it's a
     //new message since the message may be split up over multiple packets
@@ -256,9 +280,9 @@ void processClients(int server_socket){
                 if(socket_count >= MAX_SOCKETS){
                     printf("**Server has reached the maximum of %d clients**\n", MAX_SOCKETS - 1);
                     sprintf(server_message, "Server: The server has reached the maximum of %d clients", MAX_SOCKETS - 1);
-                    sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                     status = close(client_socket);
-                    checkStatus(status, "Error closing client socket");
+                    check_status(status, "Error closing client socket");
                     continue;
                 }
 
@@ -268,9 +292,9 @@ void processClients(int server_socket){
                 
                 //Set client socket to nonblocking
                 flags = fcntl(client_socket, F_GETFL);
-                checkStatus(flags, "Error getting flags for client socket");
+                check_status(flags, "Error getting flags for client socket");
                 status = fcntl(client_socket, F_SETFL, flags | O_NONBLOCK);
-                checkStatus(status, "Error setting client socket to nonblocking");
+                check_status(status, "Error setting client socket to nonblocking");
                 
                 //Get the ip address and port number of the connecting user
                 inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, sizeof(ip_str));
@@ -292,11 +316,11 @@ void processClients(int server_socket){
 
                 //Send server welcome messages to client
                 sprintf(server_message, "Server: Welcome to the server - Default username is \"%s\"", username);
-                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                 sprintf(server_message, "Server: Use the /nick command to change your username");
-                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                 sprintf(server_message, "Server: Use the /join command to join a chat room");
-                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
+                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
                 
                 //Print client joining message to the server's terminal
                 printf("**Client%lu on socket %d (%s:%hu) joined the server**\n", index, client_socket, ip_str, port);
@@ -357,7 +381,7 @@ void processClients(int server_socket){
                     
                         //Print message to chat room
                         sprintf(server_message, "Server: %s left the server", username);
-                        sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                        send_message_to_all(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                         //Remove client entry from server
                         remove_user(room_id, user);
@@ -408,7 +432,7 @@ void processClients(int server_socket){
                                 rebuild_who_message(who_message, i);
 
                                 //Send message containing current users in room #i
-                                sendMessage(client_socket, who_message[i], strlen(who_message[i]) + 1);
+                                send_message(client_socket, who_message[i], strlen(who_message[i]) + 1);
                                 sleep(0.5);
                             }
 
@@ -421,7 +445,7 @@ void processClients(int server_socket){
                             //Check if argument after /who is valid
                             if(!isdigit(client_message[5])){
                                 sprintf(server_message, "Server: Enter a valid room number (1 to %d) after /who", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;    
                             }
                             
@@ -432,7 +456,7 @@ void processClients(int server_socket){
                             //Check if chat room is valid
                             if(targeted_room_id >= MAX_ROOMS || targeted_room_id <= 0){
                                 sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 1 to %d)", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
@@ -440,7 +464,7 @@ void processClients(int server_socket){
                             rebuild_who_message(who_message, targeted_room_id);
 
                             //Send message containing current users in the specified room
-                            sendMessage(client_socket, who_message[targeted_room_id], strlen(who_message[targeted_room_id]) + 1);
+                            send_message(client_socket, who_message[targeted_room_id], strlen(who_message[targeted_room_id]) + 1);
                             continue; 
                         }
 
@@ -450,7 +474,7 @@ void processClients(int server_socket){
                             //Check if argument after /join is valid
                             if(client_message[5] != ' ' || !isdigit(client_message[6])){
                                 sprintf(server_message, "Server: Enter a valid room number (0 to %d) after /join", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;    
                             }
                             
@@ -461,14 +485,14 @@ void processClients(int server_socket){
                             //Check if chat room is valid
                             if(new_room_id >= MAX_ROOMS || new_room_id < 0){
                                 sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 0 to %d)", MAX_ROOMS - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
                             //Check if already in the room
                             if(room_id == new_room_id){
                                 sprintf(server_message, "Server: You are already in room #%d", room_id);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;                                
                             }
 
@@ -477,7 +501,7 @@ void processClients(int server_socket){
 
                             //Send message letting clients in new room know someone joined the room
                             sprintf(server_message, "Server: User \"%s\" joined the chat room", username);
-                            sendMessageToAll(new_room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message_to_all(new_room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             
                             //Move user to the new chat room
                             add_user(new_room_id, username, user->index, user->socket_fd, user->ip, user->port);
@@ -485,11 +509,11 @@ void processClients(int server_socket){
 
                             //Send message letting clients in old chat room know someone changed rooms
                                 sprintf(server_message, "Server: User \"%s\" switched to chat room #%d", username, new_room_id);
-                                sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message_to_all(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             
                             //Send message to client who just joined the room
                             sprintf(server_message, "Server: You have joined chat room #%d", new_room_id);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                             //Set both room's who_message for rebuild
                             who_message[room_id][0] = '\0';
@@ -501,7 +525,7 @@ void processClients(int server_socket){
                         //Echo back the client's username
                         if(strncmp(client_message, "/nick", 6) == 0){
                             sprintf(server_message, "Server: Your username is \"%s\"", username);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
@@ -509,22 +533,68 @@ void processClients(int server_socket){
                         if(strncmp(client_message, "/nick ", 6) == 0){
 
                             char *new_name = NULL;
+                            char *password = NULL;
+                            char *db_password = NULL;
+                            char *error_message = NULL;
 
-                            //Get new name from client's message
-                            new_name = client_message + 6;
-
-                            //Force the first letter to be uppercase
-                            new_name[0] = toupper(new_name[0]);
-
+                            //Get username and one password from client's message
+                            get_username_and_passwords(6, client_message, &new_name, &password, NULL);
+                                                  
                             //Check if the username is valid or restricted
                             if(!is_username_valid(new_name, server_message) || !is_username_restricted(new_name, server_message)){
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }       
 
+                            //Check if client already has the username
+                            if(strcmp(username, new_name) == 0){
+                                sprintf(server_message, "Server: Your username is already \"%s\"", new_name);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
                             //Check if username is registered in database     
+                            sprintf(query, "SELECT password FROM users WHERE id = '%s';", new_name);
+                            status = sqlite3_exec(user_db, query, callback, &db_password, &error_message);
+                            if(status != SQLITE_OK){
+                                //Print SQL error to the server terminal
+                                fprintf(stderr, "SQL query error: %s\n", error_message);
+                                sqlite3_free(error_message);
+                            }
 
+                            if(db_password){ //Username requires a password
+                                /* DEBUG PRINT */
+                                printf("The SQL query returned: %s\n", db_password);
+                                /* ----------- */
 
+                                //Return error message if client did not specify a password
+                                if(password == NULL){
+                                    sprintf(server_message, "Server: The username \"%s\" requires a password", new_name);
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    free(db_password);
+                                    continue;
+                                }
+
+                                //Check if password is valid
+                                if(!is_password_valid(password, server_message)){
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    continue;     
+                                }
+
+                                //Compare client password with database password
+                                if(strcmp(password, db_password) != 0){
+                                    sprintf(server_message, "Server: The specified password was incorrect");
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    free(db_password);
+                                    continue;
+                                }
+
+                                free(db_password);
+
+                            }else{ //Username is not registered
+                                printf("The SQL query had no results\n");
+                            }
+                            
                             //Check if username is already in use on the server
                             bool name_in_use = false;
                             for(int i = 0; i < MAX_ROOMS; i++){
@@ -534,10 +604,10 @@ void processClients(int server_socket){
                                 }
                             }
                             if(name_in_use){
-                                sprintf(server_message, "Server: The username \"%s\" is already in use", new_name);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                sprintf(server_message, "Server: The username \"%s\" is currently in use", new_name);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
-                            }                          
+                            }     
                             
                             //Print name change message to server's terminal
                             printf("**%s on socket %d changed username to %s**\n", username, client_socket, new_name);
@@ -545,10 +615,10 @@ void processClients(int server_socket){
                             //Send name change message to all clients if not in lobby
                             if(room_id != LOBBY_ROOM_ID){
                                 sprintf(server_message, "Server: %s changed their name to %s", username, new_name);
-                                sendMessageToAll(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message_to_all(room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             }else{
-                                sprintf(server_message, "Server: Your name has been changed to %s", new_name);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);  
+                                sprintf(server_message, "Server: Your username has been changed to \"%s\"", new_name);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);  
                             }
                             
                             //Change username in active_users hash table
@@ -563,7 +633,7 @@ void processClients(int server_socket){
                         //Return the chat room you are currently in
                         if(strncmp(client_message, "/where", 7) == 0){
                             sprintf(server_message, "Server: You are currently in chat room #%d", room_id);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
@@ -576,7 +646,7 @@ void processClients(int server_socket){
 
                             //Check if the username is valid
                             if(!is_username_valid(username, server_message)){
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }     
 
@@ -592,7 +662,7 @@ void processClients(int server_socket){
                             }
 
                             //Inform client about the specified user
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                             continue;
                         }
@@ -614,7 +684,7 @@ void processClients(int server_socket){
                             if(target_username_length > USERNAME_LENGTH - 1){
                                 //Username is too long
                                 sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
@@ -624,7 +694,7 @@ void processClients(int server_socket){
                             if(target == NULL){
                                 //Username does not exist
                                 sprintf(server_message, "Server: The user \"%s\" does not exist", target_username);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
                             
@@ -633,7 +703,7 @@ void processClients(int server_socket){
                             }else{
                                 sprintf(server_message, "Server: The address of \"%s\" is %s:%d", target_username, target->ip, target->port);
                             }
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                             continue;
                         }
@@ -647,14 +717,14 @@ void processClients(int server_socket){
 
                             //Check if the username is valid
                             if(!is_username_valid(targeted_username, server_message)){
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
                             //Prevent client from kicking themself
                             if(strcmp(username, targeted_username) == 0){
                                 sprintf(server_message, "Server: Using /kick on yourself is restricted");
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
@@ -671,7 +741,7 @@ void processClients(int server_socket){
 
                                     //Inform targeted_user that they have been kicked
                                     sprintf(server_message, "Server: You have been kicked from the server");
-                                    sendMessage(targeted_user->socket_fd, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    send_message(targeted_user->socket_fd, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                                     //Remove client entry from server
                                     remove_user(targeted_room, targeted_user);
@@ -689,18 +759,87 @@ void processClients(int server_socket){
 
                                 //Inform the chat room about the kick
                                 sprintf(server_message, "Server: \"%s\" has been kicked from the server", targeted_username);
-                                sendMessageToAll(targeted_room, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message_to_all(targeted_room, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                                 //Also inform client if they are in a different room or the lobby
                                 if(room_id != targeted_room || targeted_room == LOBBY_ROOM_ID){
-                                    sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 }
                             }else{
                                 //Inform client that user was not found
                                 sprintf(server_message, "Server: \"%s\" is currently not on the server", targeted_username);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             }
                             
+                            continue;
+                        }
+
+                        //Inform client of /register usage
+                        if(strncmp(client_message, "/register", 10) == 0){
+                            sprintf(server_message, "Server: Type \"/register <username> <password> <password>\" to register");
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
+                            continue;
+                        }
+
+                        //Register username in user database
+                        if(strncmp(client_message, "/register ", 10) == 0){
+
+                            char *new_name = NULL;
+                            char *password = NULL;
+                            char *password2 = NULL;
+                            char *error_message = NULL;
+
+                            //Get username and passwords from client's message
+                            get_username_and_passwords(10, client_message, &new_name, &password, &password2);
+
+                            //Check if the username is valid or restricted
+                            if(!is_username_valid(new_name, server_message) || !is_username_restricted(new_name, server_message)){
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }       
+
+                            //Check if passwords are valid
+                            if(!are_passwords_valid(password, password2, server_message)){
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;  
+                            }
+
+                            //Register username into user database
+                            sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', '%s');", new_name, password, "user");
+                            status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+                            if(status != SQLITE_OK){
+                                /* DEBUG PRINT */
+                                fprintf(stderr, "SQL query error: %s\n", error_message);
+                                /* ----------- */
+                                sqlite3_free(error_message);
+
+                                //Check if client is logged in as the registered database user
+                                if(strcmp(username, new_name) == 0){
+
+                                    //Change password for the registered user
+                                    //-----------------------------------------------------------------------------------------------------------------------------
+
+                                    //Print password change message to server's terminal
+                                    printf("**%s on socket %d changed their password**\n", username, client_socket);
+                                    
+                                    //Inform client of password change
+                                    sprintf(server_message, "Server: Your username password has been changed");
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                }else{
+                                    //Inform client of username already being registered
+                                    sprintf(server_message, "Server: The username \"%s\" is already registered", new_name);
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                }
+
+                            }else{
+                                //Print username registration message to server's terminal
+                                printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
+
+                                //Inform client of username registration
+                                sprintf(server_message, "Server: You have registered the username \"%s\"", new_name);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            }
+
                             continue;
                         }
 
@@ -712,7 +851,7 @@ void processClients(int server_socket){
                         }
 
                         sprintf(server_message, "Server: \"%s\" is not a valid command", client_message);
-                        sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                        send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
 
                     }else if(client_message[0] == '\0'){// || client_message[0] == '\r' || client_message[0] == '\n'){
                         /* ----------------------------- */
@@ -729,14 +868,14 @@ void processClients(int server_socket){
                             //Client currently has a timeout period
                             sprintf(server_message, "Spam Timeout: Please wait %d seconds", spam_timeout[i]);
                             pthread_mutex_unlock(&spam_lock);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }else if(spam_message_count[i] > SPAM_MESSAGE_LIMIT){ 
                             //Give client a timeout period
                             spam_timeout[i] = SPAM_TIMEOUT_LENGTH;
                             pthread_mutex_unlock(&spam_lock);
                             sprintf(server_message, "Spam Timeout: Please wait %d seconds", SPAM_TIMEOUT_LENGTH);
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
 
@@ -755,7 +894,7 @@ void processClients(int server_socket){
                             if(target_username_length > USERNAME_LENGTH - 1){
                                 //Username is too long
                                 sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
@@ -777,7 +916,7 @@ void processClients(int server_socket){
                             //Inform client if user was not found
                             if(target_user == NULL){
                                 sprintf(server_message, "Server: The user \"%s\" does not exist", target_username);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
@@ -788,18 +927,18 @@ void processClients(int server_socket){
                             //Check if message to user is blank
                             if(message[0] == '\0' || message[-1] != ' '){
                                 sprintf(server_message, "Server: The message to \"%s\" was blank", target_username);
-                                sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
                             //Add sender's username to message
-                            message = addUsernameToMessage(message, username, "> ");
+                            message = add_username_to_message(message, username, "> ");
                             size_t additional_length = strlen(username) + 3; //Add three for 0x02 and "> "
         
                             //Send message to target user and sender
-                            sendMessage(target_user->socket_fd, message, recv_status + additional_length);
+                            send_message(target_user->socket_fd, message, recv_status + additional_length);
                             if(target_user->socket_fd != client_socket){
-                                sendMessage(client_socket, message, recv_status + additional_length);
+                                send_message(client_socket, message, recv_status + additional_length);
                             }
 
                             free(message);
@@ -807,36 +946,35 @@ void processClients(int server_socket){
 
                         }
 
-                        //Don't send public messages to lobby room
+                        //Inform client they aren't in a chat room
                         if(room_id == LOBBY_ROOM_ID){
                             sprintf(server_message, "Server: You're not in a chat room - Use the /join command");
-                            sendMessage(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
                         }
-
 
                         /* ---------------------------------- */
                         /* Send client's message to all users */
                         /* ---------------------------------- */            
                         
                         //Add sender's username to message
-                        char *message = addUsernameToMessage(client_message, username, ": ");      
+                        char *message = add_username_to_message(client_message, username, ": ");      
                         size_t additional_length = strlen(username) + 3; //Add three for 0x02 and ": "       
 
                         //Print client's message to server console
-                        printTime();
+                        print_time();
                         printf("#%d ", room_id);
                         printf("%s\n", message + 1); //Add one to skip MESSAGE_START character
 
                         //Send message to all clients
-                        sendMessageToAll(room_id, message, recv_status + additional_length);
+                        send_message_to_all(room_id, message, recv_status + additional_length);
 
                         //Send load test
-                        /*sendMessageToAll(message, recv_status + additional_length);
-                        sendMessageToAll(message, recv_status + additional_length);
-                        sendMessageToAll(message, recv_status + additional_length);
-                        sendMessageToAll(message, recv_status + additional_length);
-                        sendMessageToAll(message, recv_status + additional_length);
+                        /*send_message_to_all(message, recv_status + additional_length);
+                        send_message_to_all(message, recv_status + additional_length);
+                        send_message_to_all(message, recv_status + additional_length);
+                        send_message_to_all(message, recv_status + additional_length);
+                        send_message_to_all(message, recv_status + additional_length);
                         */
                         free(message);
                     }
@@ -867,14 +1005,14 @@ void processClients(int server_socket){
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
             status = close(user->socket_fd);
-            checkStatus(status, "Error closing client socket");
+            check_status(status, "Error closing client socket");
             delete_user(room_id, user);
         }
     }
 
 }
 
-int sendMessage(int socket, char *message, int message_length){
+int send_message(int socket, char *message, int message_length){
 
     int bytes_sent = 0;
 
@@ -891,7 +1029,7 @@ int sendMessage(int socket, char *message, int message_length){
     return bytes_sent;
 }
 
-int sendMessageToAll(int room_id, char *message, int message_length){
+int send_message_to_all(int room_id, char *message, int message_length){
 
     //Prevent messages from being sent to everyone in the lobby room
     if(room_id == LOBBY_ROOM_ID){
@@ -902,14 +1040,14 @@ int sendMessageToAll(int room_id, char *message, int message_length){
     struct table_entry *s;
 
     for(s = active_users[room_id]; s != NULL; s = s->hh.next) {
-        status = sendMessage(s->socket_fd, message, message_length);                     
+        status = send_message(s->socket_fd, message, message_length);                     
     }                                                            
 
     return status;
 }
 
 
-char *addUsernameToMessage(char *message, char *username, char *suffix){
+char *add_username_to_message(char *message, char *username, char *suffix){
 //NOTE: Calling function must call free on the allocated memory
 
     int length = 1 + USERNAME_LENGTH + strlen(suffix) + MESSAGE_LENGTH + 1;
@@ -929,7 +1067,7 @@ char *addUsernameToMessage(char *message, char *username, char *suffix){
     return message_result;
 }
 
-void printTime(){
+void print_time(){
     time_t raw_time = time(NULL);
     struct tm *cur_time;
 
@@ -941,7 +1079,7 @@ void printTime(){
     printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
 }
 
-int checkStatus(int status, char *error){
+int check_status(int status, char *error){
     if(status == -1){
         perror(error);
         exit(EXIT_FAILURE);
@@ -949,7 +1087,93 @@ int checkStatus(int status, char *error){
     return status;
 }
 
+void get_username_and_passwords(int cmd_length, char *client_message, char **new_name, char **password, char **password2){
+    
+    //Skip over command in client's message
+    *new_name = client_message + cmd_length;
+
+    //Force the first letter to be uppercase
+    (*new_name)[0] = toupper((*new_name)[0]);
+
+    if(password == NULL){return;} //Calling function doesn't want password
+
+    //Check if the user entered a password
+    *password = memchr(*new_name, ' ', USERNAME_LENGTH);
+    if(*password != NULL){
+
+        //Null terminate username and get pointer to password
+        (*password)[0] = '\0';
+        (*password)++;
+
+        if(password2 == NULL){return;} //Calling function doesn't want a second password
+
+        //Check if the user entered a second password
+        *password2 = memchr(*password, ' ', USERNAME_LENGTH);
+        if(*password2 != NULL){
+
+            //Null terminate previous password and get pointer to next password
+            (*password2)[0] = '\0';
+            (*password2)++;
+        }
+    }
+
+}
+
+int is_password_valid(char *password, char *error_message){
+
+    //Check if password is too long
+    if(!memchr(password, '\0', PASSWORD_LENGTH_MAX)){
+        sprintf(error_message, "Server: Password is too long (max %d characters)", PASSWORD_LENGTH_MAX - 1);
+        return 0;
+    }
+                        
+    //Check if password has any whitespace
+    if(strpbrk(password, " \t\n\v\f\r")){
+        sprintf(error_message, "Server: Passwords with spaces are restricted");
+        return 0;                            
+    }
+
+    //Check if password is too short
+    if(memchr(password, '\0', PASSWORD_LENGTH_MIN)){
+        sprintf(error_message, "Server: Password is too short (min %d characters)", PASSWORD_LENGTH_MIN);
+        return 0; 
+    }
+
+    return 1;
+}
+
+int are_passwords_valid(char *password, char *password2, char *error_message){
+
+    //Check if password is valid
+    if(!is_password_valid(password, error_message)){
+        return 0;
+    }
+    
+    //Check if password2 is valid
+    if(password2 == NULL){
+        sprintf(error_message, "Server: The entered command requires the password be repeated");
+        return 0;
+    }
+    if(!is_password_valid(password2, error_message)){
+        return 0;
+    }
+
+    //Check is both passwords match
+    if(strcmp(password, password2) != 0){
+        sprintf(error_message, "Server: The two entered passwords do not match");
+        return 0;
+    }
+    
+    return 1;
+}
+
 int is_username_valid(char *username, char *error_message){
+
+    //Check if username exists
+    if(username == NULL){
+        sprintf(error_message, "Server: The entered command requires a username");
+        return 0;
+    }
 
     //Check if username is too long
     if(!memchr(username, '\0', 16)){
@@ -1043,7 +1267,7 @@ void remove_user(int room_id, struct table_entry *user){
     pthread_mutex_unlock(&spam_lock);
 
     //Close the client socket
-    checkStatus(close(user->socket_fd), "Error closing client socket");
+    check_status(close(user->socket_fd), "Error closing client socket");
 
     //Set FD to ignore state, decrement socket count, and set who_message for rebuild
     socket_fds[i].fd = -1;
@@ -1088,4 +1312,12 @@ void delete_user(int room_id, struct table_entry *user) {
 
 int id_compare(struct table_entry *a, struct table_entry *b){
     return (strcasecmp(a->id, b->id));
+}
+
+static int callback(void *result, int argc, char **argv, char **azColName){
+    for(int i = 0; i < argc; i++){
+      printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+    }
+    *((char **) result) = strdup(argv[0] ? argv[0] : "NULL");
+    return 0;
 }
