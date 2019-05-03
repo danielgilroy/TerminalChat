@@ -37,6 +37,7 @@
 struct table_entry{
     char id[USERNAME_LENGTH];  /* key */
     size_t index;
+    bool is_admin;
     int socket_fd;
     char ip[INET_ADDRSTRLEN];
     unsigned short port;
@@ -58,7 +59,7 @@ int is_username_valid(char *, char *);
 int is_username_restricted(char *, char *);
 void rebuild_who_message(char **, int);
 void remove_user(int, struct table_entry *);
-void add_user(int, char *, size_t, int, char *, unsigned short);
+void add_user(int, char *, size_t, bool, int, char *, unsigned short);
 struct table_entry *get_user(int, char *);
 void change_username(int, struct table_entry *, char *);
 void delete_user(int, struct table_entry *);
@@ -323,7 +324,7 @@ void process_clients(int server_socket){
                 sprintf(username, "Client%zu", index);
 
                 //Add client to the lobby room in active_users hash table
-                add_user(LOBBY_ROOM_ID, username, index, client_socket, ip_str, port);
+                add_user(LOBBY_ROOM_ID, username, index, false, client_socket, ip_str, port);
 
                 //Send server welcome messages to client
                 sprintf(server_message, "Server: Welcome to the server - Default username is \"%s\"", username);
@@ -514,7 +515,7 @@ void process_clients(int server_socket){
                             send_message_to_all(new_room_id, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             
                             //Move user to the new chat room
-                            add_user(new_room_id, username, user->index, user->socket_fd, user->ip, user->port);
+                            add_user(new_room_id, username, user->index, user->is_admin, user->socket_fd, user->ip, user->port);
                             delete_user(room_id, user);
 
                             //Send message letting clients in old chat room know someone changed rooms
@@ -545,6 +546,7 @@ void process_clients(int server_socket){
                             char *new_name = NULL;
                             char *password = NULL;
                             char *db_password = NULL;
+                            char *user_type = NULL;
                             char *error_message = NULL;
 
                             //Get username and one password from client's message
@@ -599,6 +601,15 @@ void process_clients(int server_socket){
                                     continue;
                                 }
 
+                                //Get user type from the database
+                                sprintf(query, "SELECT type FROM users WHERE id = '%s';", new_name);
+                                status = sqlite3_exec(user_db, query, callback, &user_type, &error_message);
+                                if(status != SQLITE_OK){
+                                    //Print SQL error to the server terminal
+                                    fprintf(stderr, "SQL query error: %s\n", error_message);
+                                    sqlite3_free(error_message);
+                                }
+
                                 free(db_password);
 
                             }else{ //Username is not registered
@@ -618,6 +629,20 @@ void process_clients(int server_socket){
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }     
+
+                            //Check if database returned an admin user type
+                            if(user_type && strcmp(user_type, "admin") == 0){
+                                user->is_admin = true;
+                            }else{
+                                user->is_admin = false; 
+                            }
+                            free(user_type);
+
+                            //Change username in active_users hash table
+                            change_username(room_id, user, new_name);
+
+                            //Set who_message for rebuild
+                            who_message[room_id][0] = '\0';
                             
                             //Print name change message to server's terminal
                             printf("**%s on socket %d changed username to %s**\n", username, client_socket, new_name);
@@ -631,12 +656,6 @@ void process_clients(int server_socket){
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);  
                             }
                             
-                            //Change username in active_users hash table
-                            change_username(room_id, user, new_name);
-
-                            //Set who_message for rebuild
-                            who_message[room_id][0] = '\0';
-
                             continue;
                         }
 
@@ -689,6 +708,13 @@ void process_clients(int server_socket){
                         //Return the targeted user's IP address and port
                         if(strncmp(client_message, "/whois ", 7) == 0){
 
+                            //Check if user isn't an admin
+                            if(!user->is_admin){
+                                sprintf(server_message, "Server: Only server admins can use the /whois command");
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
                             char *target_username = client_message + 7;
                             int target_username_length = strlen(target_username);
                             if(target_username_length > USERNAME_LENGTH - 1){
@@ -718,9 +744,23 @@ void process_clients(int server_socket){
                             continue;
                         }
 
+                        //Inform client of /kick usage
+                        if(strncmp(client_message, "/kick", 6) == 0){
+                            sprintf(server_message, "Server: Type \"/kick <username>\" to kick users");
+                            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
+                            continue;
+                        }
+
                         //Kick specified user from the server
                         if(strncmp(client_message, "/kick ", 6) == 0){
                            
+                            //Check if user isn't an admin
+                            if(!user->is_admin){
+                                sprintf(server_message, "Server: Only server admins can use the /kick command");
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
                             //Get username from message and force first letter to uppercase
                             char *targeted_username = client_message + 6;
                             targeted_username[0] = toupper(targeted_username[0]);
@@ -733,7 +773,7 @@ void process_clients(int server_socket){
 
                             //Prevent client from kicking themself
                             if(strcmp(username, targeted_username) == 0){
-                                sprintf(server_message, "Server: Using /kick on yourself is restricted");
+                                sprintf(server_message, "Server: Using /kick on yourself is prohibited");
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
@@ -853,7 +893,7 @@ void process_clients(int server_socket){
                             }else{
 
                                 //Register username into database if it doesn't already exist
-                                sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', '%s');", new_name, password, "user");
+                                sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', 'user');", new_name, password);
                                 status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
                                 if(status != SQLITE_OK){
                                     fprintf(stderr, "SQL query error: %s\n", error_message);
@@ -875,9 +915,20 @@ void process_clients(int server_socket){
 
                         //Trigger server shutdown
                         if(strncmp(client_message, "/die", 5) == 0){
+
+                            //Check if user isn't an admin
+                            if(!user->is_admin){
+                                sprintf(server_message, "Server: Only server admins can use the /die command");
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                continue;
+                            }
+
+                            //Flag server for shutdown
                             pthread_mutex_lock(&shutdown_lock);
                             shutdown_server = true;
                             pthread_mutex_unlock(&shutdown_lock);
+                            
+                            continue;
                         }
 
                         sprintf(server_message, "Server: \"%s\" is not a valid command", client_message);
@@ -1024,20 +1075,26 @@ void process_clients(int server_socket){
     /* Shutting down server */
     /* -------------------- */
 
-    //Free who_message strings
-    for(int i = 0; i < MAX_ROOMS; i++){
-        free(who_message[i]);
-    }
+    //Create server shutdown message
+    sprintf(server_message, "Server: The server has been shutdown by an admin");
 
     //Close client sockets and delete/free users in hash table
     struct table_entry *user, *tmp;
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
-            status = close(user->socket_fd);
+            client_socket = user->socket_fd;
+            send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+            status = close(client_socket);
             check_status(status, "Error closing client socket");
             delete_user(room_id, user);
         }
     }
+
+    //Free who_message strings
+    for(int i = 0; i < MAX_ROOMS; i++){
+        free(who_message[i]);
+    }
+
 }
 
 int send_message(int socket, char *message, int message_length){
@@ -1297,7 +1354,7 @@ void remove_user(int room_id, struct table_entry *user){
     delete_user(room_id, user);
 }
 
-void add_user(int room_id, char *username, size_t index, int client_fd, char *ip, unsigned short port){
+void add_user(int room_id, char *username, size_t index, bool is_admin, int client_fd, char *ip, unsigned short port){
     struct table_entry *s;
     s = malloc(sizeof(struct table_entry));
     if(s == NULL){
@@ -1306,6 +1363,7 @@ void add_user(int room_id, char *username, size_t index, int client_fd, char *ip
     }
     strcpy(s->id, username);
     s->index = index;
+    s->is_admin = is_admin;
     s->socket_fd = client_fd;
     strcpy(s->ip, ip);
     s->port = port;
@@ -1320,7 +1378,7 @@ struct table_entry *get_user(int room_id, char *username){
 }
 
 void change_username(int room_id, struct table_entry *user, char *username){
-    add_user(room_id, username, user->index, user->socket_fd, user->ip, user->port);
+    add_user(room_id, username, user->index, user->is_admin, user->socket_fd, user->ip, user->port);
     delete_user(room_id, user);
 }
 
