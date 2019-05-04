@@ -44,6 +44,7 @@ struct table_entry{
     UT_hash_handle hh;         /* makes this structure hashable */
 };
 
+void open_database();
 void start_server();
 void *spam_filter();
 void process_clients(int);
@@ -81,26 +82,109 @@ sqlite3 *user_db;
 
 int main(){
 
-    printf("**Starting Server**\n");
     pthread_mutex_init(&shutdown_lock, NULL);
     pthread_mutex_init(&spam_lock, NULL);
     
+    printf("**Opening Database**\n");
+    open_database();
+    printf("**Starting Server**\n");
     start_server();
 
     printf("**Shutting Down Server**\n");
+
     pthread_mutex_destroy(&shutdown_lock);
     pthread_mutex_destroy(&spam_lock);
 
     return 0;
 }
 
+void open_database(){
+
+    int status;
+    char query[QUERY_LENGTH];
+    char *has_result = NULL;
+    char *error_message = NULL;
+    
+    //Open database of registered users
+    status = sqlite3_open("users.db", &user_db);
+    if(status != SQLITE_OK){
+        fprintf(stderr, "Error opening database: %s\n", sqlite3_errmsg(user_db));
+        sqlite3_close(user_db);
+    }
+
+    //Create "users" table if it does not exist    
+    sprintf(query, "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);");
+    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+    if(status != SQLITE_OK){
+        //Print SQL error to the server terminal
+        fprintf(stderr, "SQL query error: %s\n", error_message);
+        sqlite3_free(error_message);
+    }
+
+    //Check if initial admin account has already been created
+    sprintf(query, "SELECT 1 FROM users WHERE type = 'admin'");
+    status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
+    if(status != SQLITE_OK){
+        //Print SQL error to the server terminal
+        fprintf(stderr, "SQL query error: %s\n", error_message);
+        sqlite3_free(error_message);
+    }
+
+    //Create initial admin account if it doesn't exist
+    if(!has_result){
+
+        char *admin_password = NULL;
+        char *password_error = NULL;
+        char *newline = NULL;
+        admin_password = malloc(MESSAGE_LENGTH);
+        if(admin_password == NULL){
+            perror("Error allocating memory for admin_password");
+            exit(EXIT_FAILURE);
+        }
+        password_error = malloc(MESSAGE_LENGTH);
+        if(password_error == NULL){
+            perror("Error allocating memory for admin_password error message");
+            exit(EXIT_FAILURE);
+        }else{
+            password_error[0] = '\0';
+        }
+
+        printf("**Creating Admin Account**\n");
+
+        //Get admin password from server administrator
+        do{
+            if(*password_error){ //Print error message if not blank
+                printf("%s\n", password_error + 8); //Add 8 to skip over "Server: " prefix
+            }
+            printf("Please enter a password for the account \"Admin\": ");
+            fgets(admin_password, MESSAGE_LENGTH, stdin);
+            if((newline = strchr(admin_password, '\n')) != NULL){
+                *newline = '\0'; //Remove newline from user input
+            }
+        }while(!is_password_valid(admin_password, password_error));
+
+        //Register admin account into database with specified password
+        sprintf(query, "INSERT INTO users(id, password, type) VALUES('Admin', '%s', 'admin');", admin_password);
+        status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
+        if(status != SQLITE_OK){
+            fprintf(stderr, "SQL query error: %s\n", error_message);
+            sqlite3_free(error_message);
+        }else{
+            printf("**Admin Account Created**\n");
+        }
+
+        free(admin_password);
+        free(password_error);
+    }
+
+    free(has_result);
+}
+
 void start_server(){
 
     int status;
     int flags;
-    char query[QUERY_LENGTH];
-    char *error_message = NULL;
-
+    
     //Define the server's IP address and port
     struct sockaddr_in server_address;
     server_address.sin_family = AF_INET;
@@ -144,22 +228,6 @@ void start_server(){
     //Create thread for spam filter
     pthread_t spam_tid;
     pthread_create(&spam_tid, NULL, spam_filter, NULL);
-
-    //Open database of registered users
-    status = sqlite3_open("users.db", &user_db);
-    if(status != SQLITE_OK){
-        fprintf(stderr, "Error opening database: %s\n", sqlite3_errmsg(user_db));
-        sqlite3_close(user_db);
-    }
-
-    //Check if "users" table exists in the database     
-    sprintf(query, "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);");
-    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-    if(status != SQLITE_OK){
-        //Print SQL error to the server terminal
-        fprintf(stderr, "SQL query error: %s\n", error_message);
-        sqlite3_free(error_message);
-    }
 
     //Call method for processing clients
     process_clients(server_socket);
@@ -854,7 +922,7 @@ void process_clients(int server_socket){
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;  
                             }
-
+                            
                             //Check if username already exists in database
                             sprintf(query, "SELECT id FROM users WHERE id = '%s';", new_name);
                             status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
@@ -863,7 +931,7 @@ void process_clients(int server_socket){
                                 sqlite3_free(error_message);
                                 continue;
                             }
-                            if(has_result != NULL){
+                            if(has_result){
                                 
                                 //Check if client is logged in as the registered database user
                                 if(strcmp(username, new_name) == 0){
@@ -892,7 +960,7 @@ void process_clients(int server_socket){
 
                             }else{
 
-                                //Register username into database if it doesn't already exist
+                                //Register username into database
                                 sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', 'user');", new_name, password);
                                 status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
                                 if(status != SQLITE_OK){
@@ -1276,7 +1344,8 @@ int is_username_valid(char *username, char *error_message){
 
 int is_username_restricted(char *username, char *error_message){
     
-    char *restricted[] = {"Server", "Client", "Admin", "Moderator"};
+    //Restriction list - "Admin" is already registered and password protected
+    char *restricted[] = {"Server", "Client", "Administrator", "Moderator"};
 
     //Check if username is a restricted name
     for(int i = 0; i < sizeof(restricted) / sizeof(restricted[0]); i++){
@@ -1392,9 +1461,14 @@ int id_compare(struct table_entry *a, struct table_entry *b){
 }
 
 static int callback(void *result, int argc, char **argv, char **azColName){
+    
     /*for(int i = 0; i < argc; i++){
       printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
     }*/
-    *((char **) result) = strdup(argv[0] ? argv[0] : "NULL");
+
+    if(result != NULL){
+        *((char **) result) = strdup(argv[0] ? argv[0] : "NULL");
+    }
+
     return 0;
 }
