@@ -307,15 +307,14 @@ void process_clients(int server_socket){
     //Extra fail safe to ensure NULL terminated client message
     client_message[MESSAGE_LENGTH] = '\0';
 
-    //Allocate initial space for who_message strings and set them to the default message
+    //Allocate initial space for who_message strings and set them to rebuild state
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         who_message[room_id] = malloc(sizeof(char) * WHO_LENGTH);
         if(who_message[room_id] == NULL){
-            fprintf(stderr, "Error allocating memory for who_message\n");
+            fprintf(stderr, "Error allocating memory for who_message room #%d\n", room_id);
             exit(0);
         }
-        who_message[room_id][0] = MESSAGE_START;
-        sprintf(who_message[room_id] + 1, "Server: Room #%d is empty", room_id);
+        who_message[room_id][0] = '\0';
     }
 
     printf("**Awaiting Clients**\n");
@@ -496,23 +495,15 @@ void process_clients(int server_socket){
                     /* ------------------------------- */
                     if(client_message[0] == '/'){
         
-                        //List who's in the current chat room
-                        /*if(strncmp(client_message, "/who", 5) == 0){
-                            //Setup "/who" command with the client's current room
-                            client_message[4] = ' ';
-                            client_message[5] = '\0';
-                            sprintf(client_message, "%s%d", client_message, room_id);
-                            //Fallthrough to the targeted /who command
-                        }*/
+                        //List who's in every chat room
                         if(strncmp(client_message, "/who", 5) == 0){
                         
-                            for(int i = 0; i < MAX_ROOMS; i++){
+                            for(int i = 1; i < MAX_ROOMS; i++){
                                 //Rebuild who_message strings if necessary
                                 rebuild_who_message(who_message, i);
 
                                 //Send message containing current users in room #i
                                 send_message(client_socket, who_message[i], strlen(who_message[i]) + 1);
-                                sleep(0.5);
                             }
 
                             continue;
@@ -533,10 +524,15 @@ void process_clients(int server_socket){
                             int targeted_room_id = atoi(targeted_room);
                             
                             //Check if chat room is valid
-                            if(targeted_room_id >= MAX_ROOMS || targeted_room_id <= 0){
+                            if(targeted_room_id >= MAX_ROOMS || targeted_room_id < 0){
                                 sprintf(server_message, "Server: Specified room doesn't exist (valid rooms are 1 to %d)", MAX_ROOMS - 1);
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
+                            }
+
+                            //Set target_room_id to current room if zero
+                            if(targeted_room_id == 0){
+                                targeted_room_id = room_id;
                             }
 
                             //Rebuild who_message strings if necessary
@@ -933,7 +929,7 @@ void process_clients(int server_socket){
                             }
                             if(has_result){
                                 
-                                //Check if client is logged in as the registered database user
+                                //Check if client is currently the registered database user
                                 if(strcmp(username, new_name) == 0){
 
                                     //Change password for the registered user
@@ -1344,12 +1340,25 @@ int is_username_valid(char *username, char *error_message){
 
 int is_username_restricted(char *username, char *error_message){
     
-    //Restriction list - "Admin" is already registered and password protected
-    char *restricted[] = {"Server", "Client", "Administrator", "Moderator"};
+    char *restricted_contains[] = {"Admin", "Server", "Client", "Administrator", "Moderator"};
+    char *restricted_exact[] = {"Empty"};
 
-    //Check if username is a restricted name
-    for(int i = 0; i < sizeof(restricted) / sizeof(restricted[0]); i++){
-        if(strncasecmp(username, restricted[i], strlen(restricted[i])) == 0){
+    //Allow restricted usernames that are registered in database and password protected
+    if(strcasecmp(username, "Admin") == 0){
+        return 1;
+    }
+
+    //Check if username contains a restricted keyword
+    for(int i = 0; i < sizeof(restricted_contains) / sizeof(restricted_contains[0]); i++){
+        if(strncasecmp(username, restricted_contains[i], strlen(restricted_contains[i])) == 0){
+            sprintf(error_message, "Server: Usernames containing \"%s\" are restricted", restricted_contains[i]);
+            return 0;  
+        }
+    }
+
+    //Check if username is a restricted keyword
+    for(int i = 0; i < sizeof(restricted_exact) / sizeof(restricted_exact[0]); i++){
+        if(strcasecmp(username, restricted_exact[i]) == 0){
             sprintf(error_message, "Server: Username \"%s\" is restricted", username);
             return 0;  
         }
@@ -1367,15 +1376,16 @@ void rebuild_who_message(char** who_message, int room_id){
 
         //Insert MESSAGE_START character
         who_message[room_id][0] = MESSAGE_START;
-        sprintf(who_message[room_id] + 1, "Server: Room #%d ", room_id);
+        //sprintf(who_message[room_id] + 1, "Server: Room #%d ", room_id);
+        sprintf(who_message[room_id] + 1, "Room #%02d: ", room_id);
         
         //Check if chat room has users
         int room_user_count = HASH_COUNT(active_users[room_id]);
         if(room_user_count == 0){
-            strcat(who_message[room_id], "is empty");
+            strcat(who_message[room_id], "Empty");
         }else{
 
-            strcat(who_message[room_id], "has;");
+            //strcat(who_message[room_id], "has;");
 
             //Get who_message string length - Add extra 1 for null character
             who_message_length = strlen(who_message[room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
@@ -1394,8 +1404,8 @@ void rebuild_who_message(char** who_message, int room_id){
             //Itterate through the hash table and append usernames
             struct table_entry *s;
             for(s=active_users[room_id]; s != NULL; s = s->hh.next) {
-                strcat(who_message[room_id], " ");
                 strcat(who_message[room_id], s->id);
+                strcat(who_message[room_id], " ");
             }
 
         }
@@ -1462,7 +1472,8 @@ int id_compare(struct table_entry *a, struct table_entry *b){
 
 static int callback(void *result, int argc, char **argv, char **azColName){
     
-    /*for(int i = 0; i < argc; i++){
+    /*//DEBUG PRINT
+    for(int i = 0; i < argc; i++){
       printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
     }*/
 
