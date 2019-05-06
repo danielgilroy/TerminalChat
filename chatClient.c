@@ -66,12 +66,12 @@ void initializeChat(){
 }
 
 void initializeConnection(){
-    int recv_status;
+    int bytes_recv;
     char response[MESSAGE_LENGTH];
 
-    recv_status = joinServer(response);    
+    bytes_recv = joinServer(response);    
 
-    if (recv_status < 0){
+    if (bytes_recv < 0){
         wprintw(chat_win, "\n\n    -There was an error connecting to the server-\n");
         wprintw(chat_win, "        -The chat client will close shortly-\n");
         wrefresh(chat_win);
@@ -79,7 +79,7 @@ void initializeConnection(){
         terminateChat();
     }
 
-    printToChat(response, recv_status);
+    printToChat(response, bytes_recv);
 }
 
 void terminateChat(){
@@ -101,19 +101,20 @@ void terminateChatNow(){
 
 void *incomingMessages(){
 
-    int recv_status;
-    char server_message[MESSAGE_LENGTH];
+    int bytes_recv;
+    char server_message[MESSAGE_LENGTH + 1];
+    server_message[MESSAGE_LENGTH] = '\0';
      
     while(1){
 
-        recv_status = receiveMessage(server_message, MESSAGE_LENGTH);
+        bytes_recv = receiveMessage(server_message, MESSAGE_LENGTH);
     
-        if(recv_status == 0){
+        if(bytes_recv == 0){
             wprintw(chat_win, "\n\n       -The connection to the server has been lost-\n");
             wprintw(chat_win, "          -Type /quit to close the chat client-\n");
             wrefresh(chat_win);
             return NULL;  
-        }else if(recv_status == -1){
+        }else if(bytes_recv == -1){
             wprintw(chat_win, "\n\n  -An unknown error has occurred-\n");
             wprintw(chat_win, "-The chat client will close shortly-\n");
             wrefresh(chat_win);
@@ -121,12 +122,14 @@ void *incomingMessages(){
             terminateChatNow();  
         }
 
+        /* //DEBUG PRINT
         static int k = 0;
         //wprintw(chat_win, "\nRECV %d", k);
         k++;
         wrefresh(chat_win); 
+        */
 
-        printToChat(server_message, recv_status);
+        printToChat(server_message, bytes_recv);
     }
 }
 
@@ -203,6 +206,7 @@ void outgoingMessages(){
         status = sendMessage(user_message, message_length + 1);
         if(status == -1){
             perror("Error");
+            //terminateChat();
         }
 
         wrefresh(chat_win);
@@ -215,37 +219,8 @@ void outgoingMessages(){
 }
 
 void printToChat(char * message, int bytes){
-    
-    //wprintw(chat_win, "\nReceived %d bytes", bytes);
-    //wrefresh(chat_win);
 
-    
-    char *next;
-    do{
-        //wprintw(chat_win, "\n%d\n", bytes);
-        if(message[0] == MESSAGE_START){
-            wprintw(chat_win, "\n");
-            printTime(); 
-            message++; //Skip over message start character
-        }
-                
-        wprintw(chat_win, "%s", message);
-
-        message += strlen(message) + 1; //Move to next string - Add one to skip over the null character
-        next = strchr(message, MESSAGE_START);
-        if(next != NULL){
-            next[0] = '\0';
-            wprintw(chat_win, "%s", message);
-            next[0] = MESSAGE_START;
-            message = next;
-        }else{
-            break;
-        }
-
-    }while(1);
-    
-
-    /*int length = 0;
+    int length = 0;
     while(bytes > 0){
         //wprintw(chat_win, "\n%d\n", bytes);
         if(message[0] == MESSAGE_START){
@@ -262,7 +237,7 @@ void printToChat(char * message, int bytes){
         }else{
             bytes -= length + 1; //Remaining bytes with a null character (the string is finished in this packet)
         }
-    }*/
+    }
 
     wrefresh(chat_win); //Show message on chat window
     wrefresh(stdscr); //Ensures cursor in text window is show
@@ -285,7 +260,6 @@ void printTime(){
 static void handler(int signum){
 	pthread_exit(NULL);
 }
-
 
 
 
