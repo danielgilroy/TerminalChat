@@ -6,7 +6,6 @@
 #include <ctype.h>
 #include <pthread.h>
 #include <stdbool.h>
-#include <sqlite3.h>
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -14,6 +13,9 @@
 #include <poll.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+
+#include <sqlite3.h>
+#include <sodium.h>
 
 #include "uthash.h"
 
@@ -26,15 +28,18 @@
 #define USERNAME_LENGTH 16
 #define PASSWORD_LENGTH_MAX 16
 #define PASSWORD_LENGTH_MIN 4
+#define SALT_LENGTH 3
 #define WHO_LENGTH 64
-#define QUERY_LENGTH 128
+#define QUERY_LENGTH 256
 #define MESSAGE_LENGTH 256
 #define MESSAGE_START 0x02 //Start of Text control character
 #define SPAM_MESSAGE_LIMIT 10 //Max messages within spam interval window
 #define SPAM_INTERVAL_WINDOW 10 //Interval window (in seconds) for max message limit
 #define SPAM_TIMEOUT_LENGTH 20 //Timeout period (in seconds) for detected spammer to wait
+#define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_MODERATE //use crypto_pwhash_OPSLIMIT_INTERACTIVE if too slow
+#define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_MODERATE //use crypto_pwhash_MEMLIMIT_INTERACTIVE if too slow
 
-struct table_entry{
+typedef struct {
     char id[USERNAME_LENGTH];  /* key */
     size_t index;
     bool is_admin;
@@ -42,12 +47,13 @@ struct table_entry{
     char ip[INET_ADDRSTRLEN];
     unsigned short port;
     UT_hash_handle hh;         /* makes this structure hashable */
-};
+} table_entry_t;
 
 void open_database();
 void start_server();
 void *spam_filter();
 void process_clients(int);
+
 int send_message(int, char *, int);
 int send_message_to_all(int, char *, int);
 char *add_username_to_message(char *, char *, char *);
@@ -59,12 +65,12 @@ int are_passwords_valid(char *, char *, char *);
 int is_username_valid(char *, char *);
 int is_username_restricted(char *, char *);
 void rebuild_who_message(char **, int);
-void remove_user(int, struct table_entry *);
+void remove_user(int, table_entry_t *);
 void add_user(int, char *, size_t, bool, int, char *, unsigned short);
-struct table_entry *get_user(int, char *);
-void change_username(int, struct table_entry *, char *);
-void delete_user(int, struct table_entry *);
-int id_compare(struct table_entry *, struct table_entry *);
+table_entry_t *get_user(int, char *);
+void change_username(int, table_entry_t *, char *);
+void delete_user(int, table_entry_t *);
+int id_compare(table_entry_t *, table_entry_t *);
 static int callback(void *, int, char **, char **);
 
 struct pollfd socket_fds[MAX_SOCKETS];
@@ -72,7 +78,7 @@ int socket_count = 0;
 bool shutdown_server = false;
 pthread_mutex_t shutdown_lock;
 
-struct table_entry *active_users[MAX_ROOMS] = {NULL, }; 
+table_entry_t *active_users[MAX_ROOMS] = {NULL, }; 
 
 short spam_message_count[MAX_SOCKETS]; //Spam message counters for each client
 short spam_timeout[MAX_SOCKETS]; //Spam timeout for each client
@@ -101,7 +107,8 @@ int main(){
 void open_database(){
 
     int status;
-    char query[QUERY_LENGTH];
+    const char *query;
+    char user_input_query[QUERY_LENGTH];
     char *has_result = NULL;
     char *error_message = NULL;
     
@@ -113,7 +120,7 @@ void open_database(){
     }
 
     //Create "users" table if it does not exist    
-    sprintf(query, "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);");
+    query = "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);";
     status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
     if(status != SQLITE_OK){
         //Print SQL error to the server terminal
@@ -122,7 +129,7 @@ void open_database(){
     }
 
     //Check if initial admin account has already been created
-    sprintf(query, "SELECT 1 FROM users WHERE type = 'admin'");
+    query = "SELECT 1 FROM users WHERE type = 'admin'";
     status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
     if(status != SQLITE_OK){
         //Print SQL error to the server terminal
@@ -133,28 +140,12 @@ void open_database(){
     //Create initial admin account if it doesn't exist
     if(!has_result){
 
-        char *admin_password = NULL;
-        char *admin_password2 = NULL;
-        char *password_error = NULL;
+        char admin_password[MESSAGE_LENGTH];
+        char admin_password2[MESSAGE_LENGTH];
+        char hashed_password[crypto_pwhash_STRBYTES];
+        char password_error[MESSAGE_LENGTH];
         char *matching_error = "";
         char *newline = NULL;
-
-        //Allocate memory for string variables
-        admin_password = malloc(MESSAGE_LENGTH);
-        if(admin_password == NULL){
-            perror("Error allocating memory for admin_password");
-            exit(EXIT_FAILURE);
-        }
-        admin_password2 = malloc(MESSAGE_LENGTH);
-        if(admin_password2 == NULL){
-            perror("Error allocating memory for admin_password");
-            exit(EXIT_FAILURE);
-        }
-        password_error = malloc(MESSAGE_LENGTH);
-        if(password_error == NULL){
-            perror("Error allocating memory for admin_password error message");
-            exit(EXIT_FAILURE);
-        }
 
         printf("**Creating Admin Account**\n");
 
@@ -191,9 +182,21 @@ void open_database(){
 
         }while(strcmp(admin_password, admin_password2) != 0);
 
+        //Hash password with libsodium
+        if (crypto_pwhash_str(hashed_password, admin_password, strlen(admin_password), 
+            PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+            /* out of memory */
+            fprintf(stderr, "Ran out of memory during hash function\n");
+            exit(EXIT_FAILURE);
+        }
+    
+        //Clear the plain-text passwords from memory
+        memset(admin_password, 0, PASSWORD_LENGTH_MAX);
+        memset(admin_password2, 0, PASSWORD_LENGTH_MAX);
+        
         //Register admin account into database with specified password
-        sprintf(query, "INSERT INTO users(id, password, type) VALUES('Admin', '%s', 'admin');", admin_password);
-        status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+        snprintf(user_input_query, QUERY_LENGTH, "INSERT INTO users(id, password, type) VALUES('Admin', '%s', 'admin');", hashed_password);
+        status = sqlite3_exec(user_db, user_input_query, callback, NULL, &error_message);
         if(status != SQLITE_OK){
             fprintf(stderr, "SQL query error: %s\n", error_message);
             sqlite3_free(error_message);
@@ -201,12 +204,10 @@ void open_database(){
             printf("**Admin Account Created**\n");
         }
 
-        free(admin_password);
-        free(admin_password2);
-        free(password_error);
+    }else{
+        free(has_result);
     }
 
-    free(has_result);
 }
 
 void start_server(){
@@ -321,12 +322,12 @@ void process_clients(int server_socket){
     int recv_status;
     int client_socket;
     size_t index = 1; //Start at 1 to skip server socket
-    bool message_recv[MAX_SOCKETS] = {false, };
+    bool message_recv[MAX_SOCKETS] = {false};
     char username[USERNAME_LENGTH];
     char client_message[MESSAGE_LENGTH + 1];
     char server_message_prefixed[MESSAGE_LENGTH];
     char *server_message = server_message_prefixed + 1;
-    char *who_message[MAX_ROOMS] = {NULL, };
+    char *who_message[MAX_ROOMS] = {NULL};
     char query[QUERY_LENGTH];
     int8_t command_length = 0;
 
@@ -445,7 +446,7 @@ void process_clients(int server_socket){
         for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
 
             //Itterate through all users in the chat room
-            struct table_entry *user, *tmp;
+            table_entry_t *user, *tmp;
             HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
 
                 //Get index and username from user
@@ -526,7 +527,7 @@ void process_clients(int server_socket){
                     if(client_message[0] == '/'){
         
                         //List who's in every chat room
-                        if(strncmp(client_message, "/who", 5) == 0){
+                        if(strcmp(client_message, "/who") == 0){
                         
                             for(int i = 1; i < MAX_ROOMS; i++){
                                 //Rebuild who_message strings if necessary
@@ -574,10 +575,10 @@ void process_clients(int server_socket){
                         }
 
                         //Join the specified chat room
-                        if(strncmp(client_message, "/join", 5) == 0){
+                        if(strncmp(client_message, "/join ", 6) == 0){
 
                             //Check if argument after /join is valid
-                            if(client_message[5] != ' ' || !isdigit(client_message[6])){
+                            if(!isdigit(client_message[6])){
                                 sprintf(server_message, "Server: Enter a valid room number (0 to %d) after /join", MAX_ROOMS - 1);
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;    
@@ -628,7 +629,7 @@ void process_clients(int server_socket){
                         }
 
                         //Echo back the client's username
-                        if(strncmp(client_message, "/nick", 6) == 0){
+                        if(strcmp(client_message, "/nick") == 0){
                             sprintf(server_message, "Server: Your username is \"%s\"", username);
                             send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
@@ -640,6 +641,7 @@ void process_clients(int server_socket){
                             char *new_name = NULL;
                             char *password = NULL;
                             char *db_password = NULL;
+                            char hashed_password[crypto_pwhash_STRBYTES];
                             char *user_type = NULL;
                             char *error_message = NULL;
 
@@ -660,7 +662,7 @@ void process_clients(int server_socket){
                             }
 
                             //Check if username is registered in database     
-                            sprintf(query, "SELECT password FROM users WHERE id = '%s';", new_name);
+                            snprintf(query, QUERY_LENGTH, "SELECT password FROM users WHERE id = '%s';", new_name);
                             status = sqlite3_exec(user_db, query, callback, &db_password, &error_message);
                             if(status != SQLITE_OK){
                                 //Print SQL error to the server terminal
@@ -684,19 +686,44 @@ void process_clients(int server_socket){
                                 //Check if password is valid
                                 if(!is_password_valid(password, server_message)){
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    //Clear the plain-text password from memory
+                                    memset(client_message, 0, MESSAGE_LENGTH);
                                     continue;     
                                 }
 
-                                //Compare client password with database password
-                                if(strcmp(password, db_password) != 0){
+                                //Compare database password with client password using libsodium
+                                if(crypto_pwhash_str_verify(db_password, password, strlen(password)) != 0){
                                     sprintf(server_message, "Server: The specified password was incorrect");
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                     free(db_password);
+                                    //Clear the plain-text password from memory
+                                    memset(client_message, 0, MESSAGE_LENGTH);
                                     continue;
                                 }
 
+                                //Check if hashed password needs to be rehashed
+                                if(crypto_pwhash_str_needs_rehash(db_password, PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0){
+ 
+                                    //Hash password with libsodium
+                                    if(crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+                                        fprintf(stderr, "Ran out of memory during hash function\n");
+                                        exit(EXIT_FAILURE);
+                                    }
+                                    
+                                    //Change password for the registered user
+                                    snprintf(query, QUERY_LENGTH, "UPDATE users SET password = '%s' WHERE id = '%s';", hashed_password, new_name);
+                                    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
+                                    if(status != SQLITE_OK){
+                                        fprintf(stderr, "SQL query error: %s\n", error_message);
+                                        sqlite3_free(error_message);
+                                        //Clear the plain-text password from memory
+                                        memset(client_message, 0, MESSAGE_LENGTH);
+                                        continue;
+                                    }
+                                }
+
                                 //Get user type from the database
-                                sprintf(query, "SELECT type FROM users WHERE id = '%s';", new_name);
+                                snprintf(query, QUERY_LENGTH, "SELECT type FROM users WHERE id = '%s';", new_name);
                                 status = sqlite3_exec(user_db, query, callback, &user_type, &error_message);
                                 if(status != SQLITE_OK){
                                     //Print SQL error to the server terminal
@@ -721,6 +748,8 @@ void process_clients(int server_socket){
                             if(name_in_use){
                                 sprintf(server_message, "Server: The username \"%s\" is currently in use", new_name);
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                //Clear the plain-text password from memory
+                                memset(client_message, 0, MESSAGE_LENGTH);
                                 continue;
                             }     
 
@@ -749,12 +778,15 @@ void process_clients(int server_socket){
                                 sprintf(server_message, "Server: Your username has been changed to \"%s\"", new_name);
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);  
                             }
+
+                            //Clear the plain-text password from memory
+                            memset(client_message, 0, MESSAGE_LENGTH);
                             
                             continue;
                         }
 
                         //Return the chat room you are currently in
-                        if(strncmp(client_message, "/where", 7) == 0){
+                        if(strcmp(client_message, "/where") == 0){
                             sprintf(server_message, "Server: You are currently in chat room #%d", room_id);
                             send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                             continue;
@@ -792,7 +824,7 @@ void process_clients(int server_socket){
                         }
 
                         //Return the client's IP address and port
-                        if(strncmp(client_message, "/whois", 7) == 0){
+                        if(strcmp(client_message, "/whois") == 0){
 
                             //Setup "/whois" command with the client's own username
                             client_message[6] = ' ';
@@ -823,20 +855,8 @@ void process_clients(int server_socket){
                                 continue;
                             }
 
-                            /*//------
-                            //char *target_name = client_message + 7;
-                            int target_username_length = strlen(target_name);
-                            if(target_username_length > USERNAME_LENGTH - 1){
-                                //Username is too long
-                                sprintf(server_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                continue;
-                            }
-
-                            target_username[0] = toupper(target_username[0]);
-                            *///------
-
-                            struct table_entry *target = get_user(room_id, target_name);
+                            //Get user from active_users hash table
+                            table_entry_t *target = get_user(room_id, target_name);
                             if(target == NULL){
                                 //Username does not exist
                                 sprintf(server_message, "Server: The user \"%s\" does not exist", target_name);
@@ -855,7 +875,7 @@ void process_clients(int server_socket){
                         }
 
                         //Inform client of /kick usage
-                        if(strncmp(client_message, "/kick", 6) == 0){
+                        if(strcmp(client_message, "/kick") == 0){
                             sprintf(server_message, "Server: Type \"/kick <username>\" to kick users");
                             send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
                             continue;
@@ -891,7 +911,7 @@ void process_clients(int server_socket){
 
                             //Look for user and perform the kick if located
                             int target_room;
-                            struct table_entry *targeted_user;
+                            table_entry_t *targeted_user;
                             for(target_room = 0; target_room < MAX_ROOMS; target_room++){
                                 if((targeted_user = get_user(target_room, target_name)) != NULL){
 
@@ -936,7 +956,7 @@ void process_clients(int server_socket){
                         }
 
                         //Inform client of /register usage
-                        if(strncmp(client_message, "/register", 10) == 0){
+                        if(strcmp(client_message, "/register") == 0){
                             sprintf(server_message, "Server: Type \"/register <username> <password> <password>\" to register");
                             send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
                             continue;
@@ -948,6 +968,7 @@ void process_clients(int server_socket){
                             char *new_name = NULL;
                             char *password = NULL;
                             char *password2 = NULL;
+                            char hashed_password[crypto_pwhash_STRBYTES];
                             char *error_message = NULL;
                             char *has_result = NULL;
 
@@ -965,39 +986,41 @@ void process_clients(int server_socket){
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;  
                             }
-                            
+
+                            //Hash password with libsodium
+                            if (crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+                                fprintf(stderr, "Ran out of memory during hash function\n");
+                                exit(EXIT_FAILURE);
+                            }
+                              
                             //Check if username already exists in database
-                            sprintf(query, "SELECT id FROM users WHERE id = '%s';", new_name);
+                            snprintf(query, QUERY_LENGTH, "SELECT id FROM users WHERE id = '%s';", new_name);
                             status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
                             if(status != SQLITE_OK){
                                 fprintf(stderr, "SQL query error: %s\n", error_message);
                                 sqlite3_free(error_message);
-                                continue;
-                            }
-
-                            if(has_result){
+                            }else if(has_result){
                                 
                                 //Check if client is currently the registered database user
                                 if(strcmp(username, new_name) == 0){
 
                                     //Change password for the registered user
-                                    sprintf(query, "UPDATE users SET password = '%s' WHERE id = '%s';", password, username);
+                                    snprintf(query, QUERY_LENGTH, "UPDATE users SET password = '%s' WHERE id = '%s';", hashed_password, username);
                                     status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
                                     if(status != SQLITE_OK){
                                         fprintf(stderr, "SQL query error: %s\n", error_message);
                                         sqlite3_free(error_message);
-                                        continue;
+                                    }else{
+                                        //Print password change message to server's terminal
+                                        printf("**%s on socket %d changed their password**\n", username, client_socket);
+                                        
+                                        //Inform client of password change
+                                        sprintf(server_message, "Server: Your username password has been changed");
+                                        send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                     }
 
-                                    //Print password change message to server's terminal
-                                    printf("**%s on socket %d changed their password**\n", username, client_socket);
-                                    
-                                    //Inform client of password change
-                                    sprintf(server_message, "Server: Your username password has been changed");
-                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-
                                 }else{
-                                    //Inform client of username already being registered
+                                    //Inform client that username is already registered
                                     sprintf(server_message, "Server: The username \"%s\" is already registered", new_name);
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 }
@@ -1005,12 +1028,11 @@ void process_clients(int server_socket){
                             }else{
 
                                 //Register username into database
-                                sprintf(query, "INSERT INTO users(id, password, type) VALUES('%s', '%s', 'user');", new_name, password);
+                                snprintf(query, QUERY_LENGTH, "INSERT INTO users(id, password, type) VALUES('%s', '%s', 'user');", new_name, hashed_password);
                                 status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
                                 if(status != SQLITE_OK){
                                     fprintf(stderr, "SQL query error: %s\n", error_message);
                                     sqlite3_free(error_message);
-                                    continue;
                                 }else{
                                     //Print username registration message to server's terminal
                                     printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
@@ -1022,11 +1044,14 @@ void process_clients(int server_socket){
 
                             }
 
+                            //Clear the plain-text passwords from memory
+                            memset(client_message, 0, MESSAGE_LENGTH);
+
                             continue;
                         }
 
                         //Trigger server shutdown
-                        if(strncmp(client_message, "/die", 5) == 0){
+                        if(strcmp(client_message, "/die") == 0){
 
                             //Check if user isn't an admin
                             if(!user->is_admin){
@@ -1044,7 +1069,7 @@ void process_clients(int server_socket){
                         }
 
                         //Inform client of /admin usage
-                        if(strncmp(client_message, "/admin", 7) == 0){
+                        if(strcmp(client_message, "/admin") == 0){
                             sprintf(server_message, "Server: Type \"/admin <username>\" to change account type");
                             send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1); 
                             continue;
@@ -1090,7 +1115,7 @@ void process_clients(int server_socket){
                             }
 
                             //Check if username is registered in database
-                            sprintf(query, "SELECT type FROM users WHERE id = '%s';", target_name);
+                            snprintf(query, QUERY_LENGTH, "SELECT type FROM users WHERE id = '%s';", target_name);
                             status = sqlite3_exec(user_db, query, callback, &user_type, &error_message);
                             if(status != SQLITE_OK){
                                 fprintf(stderr, "SQL query error: %s\n", error_message);
@@ -1110,7 +1135,7 @@ void process_clients(int server_socket){
                                 free(user_type);
 
                                 //Switch targeted user's account type in database
-                                sprintf(query, "UPDATE users SET type = '%s' WHERE id = '%s';", type_change, target_name);
+                                snprintf(query, QUERY_LENGTH, "UPDATE users SET type = '%s' WHERE id = '%s';", type_change, target_name);
                                 status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
                                 if(status != SQLITE_OK){
                                     fprintf(stderr, "SQL query error: %s\n", error_message);
@@ -1119,7 +1144,7 @@ void process_clients(int server_socket){
                                 }
 
                                 //Look for user on server and change account type if located
-                                struct table_entry *user = NULL;
+                                table_entry_t *user = NULL;
                                 for(int i = 0; i < MAX_ROOMS; i++){
                                     if((user = get_user(i, target_name)) != NULL){
 
@@ -1206,7 +1231,7 @@ void process_clients(int server_socket){
                             target_username[0] = toupper(target_username[0]);
 
                             //Look for the user in all chat rooms
-                            struct table_entry *target_user = NULL;
+                            table_entry_t *target_user = NULL;
                             for(int i = 0; i < MAX_ROOMS; i++){
                                 if((target_user = get_user(i, target_username)) != NULL){
                                     break;
@@ -1298,7 +1323,7 @@ void process_clients(int server_socket){
     sprintf(server_message, "Server: The server has been shutdown by an admin");
 
     //Close client sockets and delete/free users in hash table
-    struct table_entry *user, *tmp;
+    table_entry_t *user, *tmp;
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Deletion-safe itteration
             client_socket = user->socket_fd;
@@ -1341,7 +1366,7 @@ int send_message_to_all(int room_id, char *message, int message_length){
     }
 
     int status = 0;
-    struct table_entry *s;
+    table_entry_t *s;
 
     for(s = active_users[room_id]; s != NULL; s = s->hh.next) {
         status = send_message(s->socket_fd, message, message_length);                     
@@ -1557,7 +1582,7 @@ void rebuild_who_message(char** who_message, int room_id){
             } 
 
             //Itterate through the hash table and append usernames
-            struct table_entry *s;
+            table_entry_t *s;
             for(s=active_users[room_id]; s != NULL; s = s->hh.next) {
                 strcat(who_message[room_id], s->id);
                 strcat(who_message[room_id], " ");
@@ -1567,7 +1592,7 @@ void rebuild_who_message(char** who_message, int room_id){
     }
 }
 
-void remove_user(int room_id, struct table_entry *user){
+void remove_user(int room_id, table_entry_t *user){
 
     int i = user->index;
     
@@ -1589,8 +1614,8 @@ void remove_user(int room_id, struct table_entry *user){
 }
 
 void add_user(int room_id, char *username, size_t index, bool is_admin, int client_fd, char *ip, unsigned short port){
-    struct table_entry *s;
-    s = malloc(sizeof(struct table_entry));
+    table_entry_t *s;
+    s = malloc(sizeof(table_entry_t));
     if(s == NULL){
         perror("Error allocating hash table memory for new user");
         exit(EXIT_FAILURE);
@@ -1605,23 +1630,23 @@ void add_user(int room_id, char *username, size_t index, bool is_admin, int clie
     HASH_SRT(hh, active_users[room_id], id_compare); 
 }
 
-struct table_entry *get_user(int room_id, char *username){
-    struct table_entry *user = NULL;
+table_entry_t *get_user(int room_id, char *username){
+    table_entry_t *user = NULL;
     HASH_FIND_STR(active_users[room_id], username, user);  /* user: output pointer */
     return user;
 }
 
-void change_username(int room_id, struct table_entry *user, char *username){
+void change_username(int room_id, table_entry_t *user, char *username){
     add_user(room_id, username, user->index, user->is_admin, user->socket_fd, user->ip, user->port);
     delete_user(room_id, user);
 }
 
-void delete_user(int room_id, struct table_entry *user) {
+void delete_user(int room_id, table_entry_t *user) {
     HASH_DEL(active_users[room_id], user);  /* user: pointer to deletee */
     free(user);             /* optional; it's up to you! */
 }
 
-int id_compare(struct table_entry *a, struct table_entry *b){
+int id_compare(table_entry_t *a, table_entry_t *b){
     return (strcasecmp(a->id, b->id));
 }
 
