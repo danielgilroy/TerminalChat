@@ -71,7 +71,7 @@ table_entry_t *get_user(int, char *);
 void change_username(int, table_entry_t *, char *);
 void delete_user(int, table_entry_t *);
 int id_compare(table_entry_t *, table_entry_t *);
-static int callback(void *, int, char **, char **);
+void secure_zero(void *s, size_t n);
 
 struct pollfd socket_fds[MAX_SOCKETS];
 int socket_count = 0;
@@ -108,106 +108,101 @@ void open_database(){
 
     int status;
     const char *query;
-    char user_input_query[QUERY_LENGTH];
-    char *has_result = NULL;
-    char *error_message = NULL;
-    
-    //Open database of registered users
-    status = sqlite3_open("users.db", &user_db);
-    if(status != SQLITE_OK){
+    sqlite3_stmt *stmt;
+
+    //Open database of registered users or create one if it doesn't already exist
+    if(sqlite3_open("users.db", &user_db) != SQLITE_OK){
         fprintf(stderr, "Error opening database: %s\n", sqlite3_errmsg(user_db));
         sqlite3_close(user_db);
     }
 
-    //Create "users" table if it does not exist    
+    //Create "users" table if it doesn't already exist  
     query = "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, password TEXT NOT NULL, type TEXT NOT NULL);";
-    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-    if(status != SQLITE_OK){
-        //Print SQL error to the server terminal
-        fprintf(stderr, "SQL query error: %s\n", error_message);
-        sqlite3_free(error_message);
+    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+    if(sqlite3_step(stmt) != SQLITE_DONE){
+        fprintf(stderr, "SQL error while creating table: %s\n", sqlite3_errmsg(user_db));
+        exit(EXIT_FAILURE);
     }
+    sqlite3_finalize(stmt);
 
     //Check if initial admin account has already been created
-    query = "SELECT 1 FROM users WHERE type = 'admin'";
-    status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
-    if(status != SQLITE_OK){
-        //Print SQL error to the server terminal
-        fprintf(stderr, "SQL query error: %s\n", error_message);
-        sqlite3_free(error_message);
+    query = "SELECT 1 FROM users WHERE type = 'admin';";
+    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+    if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+       sqlite3_finalize(stmt);
+       return; //Initial admin account already exists
+    }else if(status != SQLITE_DONE){
+        fprintf(stderr, "SQL error while checking for admin: %s\n", sqlite3_errmsg(user_db));
+        exit(EXIT_FAILURE);
     }
+    sqlite3_finalize(stmt);
 
-    //Create initial admin account if it doesn't exist
-    if(!has_result){
+    //Create initial admin account
+    char admin_password[MESSAGE_LENGTH];
+    char admin_password2[MESSAGE_LENGTH];
+    char hashed_password[crypto_pwhash_STRBYTES];
+    char password_error[MESSAGE_LENGTH];
+    char *matching_error = "";
+    char *newline = NULL;
 
-        char admin_password[MESSAGE_LENGTH];
-        char admin_password2[MESSAGE_LENGTH];
-        char hashed_password[crypto_pwhash_STRBYTES];
-        char password_error[MESSAGE_LENGTH];
-        char *matching_error = "";
-        char *newline = NULL;
+    printf("**Creating Admin Account**\n");
 
-        printf("**Creating Admin Account**\n");
+    //Get admin password from server administrator
+    do{
 
-        //Get admin password from server administrator
+        //Reset password_error for new itteration
+        password_error[0] = '\0';
+
+        //Print error message from previous itteration
+        if(*matching_error){
+            printf("%s\n\n", matching_error);
+        }
+
         do{
-
-            //Reset password_error for new itteration
-            password_error[0] = '\0';
-
-            //Print error message from previous itteration
-            if(*matching_error){
-                printf("%s\n\n", matching_error);
+            if(*password_error){ //Print error message if not blank
+                printf("%s\n\n", password_error + 8); //Add 8 to skip over "Server: " prefix
             }
-
-            do{
-                if(*password_error){ //Print error message if not blank
-                    printf("%s\n\n", password_error + 8); //Add 8 to skip over "Server: " prefix
-                }
-                printf("Enter password for account \"Admin\": ");
-                fgets(admin_password, MESSAGE_LENGTH, stdin);
-                if((newline = strchr(admin_password, '\n')) != NULL){
-                    *newline = '\0'; //Remove newline from user input
-                }
-            }while(!is_password_valid(admin_password, password_error));
-
-            printf("Retype the same password: ");
-            fgets(admin_password2, MESSAGE_LENGTH, stdin);
-            if((newline = strchr(admin_password2, '\n')) != NULL){
+            printf("Enter password for account \"Admin\": ");
+            fgets(admin_password, MESSAGE_LENGTH, stdin);
+            if((newline = strchr(admin_password, '\n')) != NULL){
                 *newline = '\0'; //Remove newline from user input
             }
+        }while(!is_password_valid(admin_password, password_error));
 
-            //Set matching_error message for next loop itteration
-            matching_error = "The entered passwords do not match";
-
-        }while(strcmp(admin_password, admin_password2) != 0);
-
-        //Hash password with libsodium
-        if (crypto_pwhash_str(hashed_password, admin_password, strlen(admin_password), 
-            PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
-            /* out of memory */
-            fprintf(stderr, "Ran out of memory during hash function\n");
-            exit(EXIT_FAILURE);
-        }
-    
-        //Clear the plain-text passwords from memory
-        memset(admin_password, 0, PASSWORD_LENGTH_MAX);
-        memset(admin_password2, 0, PASSWORD_LENGTH_MAX);
-        
-        //Register admin account into database with specified password
-        snprintf(user_input_query, QUERY_LENGTH, "INSERT INTO users(id, password, type) VALUES('Admin', '%s', 'admin');", hashed_password);
-        status = sqlite3_exec(user_db, user_input_query, callback, NULL, &error_message);
-        if(status != SQLITE_OK){
-            fprintf(stderr, "SQL query error: %s\n", error_message);
-            sqlite3_free(error_message);
-        }else{
-            printf("**Admin Account Created**\n");
+        printf("Retype the same password: ");
+        fgets(admin_password2, MESSAGE_LENGTH, stdin);
+        if((newline = strchr(admin_password2, '\n')) != NULL){
+            *newline = '\0'; //Remove newline from user input
         }
 
-    }else{
-        free(has_result);
+        //Set matching_error message for next loop itteration
+        matching_error = "The entered passwords do not match";
+
+    }while(strcmp(admin_password, admin_password2) != 0);
+
+    //Hash password with libsodium
+    if (crypto_pwhash_str(hashed_password, admin_password, strlen(admin_password), 
+        PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+        /* out of memory */
+        fprintf(stderr, "Ran out of memory during hash function\n");
+        exit(EXIT_FAILURE);
     }
 
+    //Clear the plain-text passwords from memory
+    secure_zero(admin_password, PASSWORD_LENGTH_MAX);
+    secure_zero(admin_password2, PASSWORD_LENGTH_MAX);
+
+    //Register admin account into database with specified password
+    query = "INSERT INTO users(id, password, type) VALUES('Admin', ?1, 'admin');";
+    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, hashed_password, -1, SQLITE_STATIC);
+    if(sqlite3_step(stmt) != SQLITE_DONE){
+        fprintf(stderr, "SQL error while inserting admin account: %s\n", sqlite3_errmsg(user_db));
+        exit(EXIT_FAILURE);
+    }else{
+        printf("**Admin Account Created**\n");
+    }
+    sqlite3_finalize(stmt);
 }
 
 void start_server(){
@@ -328,7 +323,8 @@ void process_clients(int server_socket){
     char server_message_prefixed[MESSAGE_LENGTH];
     char *server_message = server_message_prefixed + 1;
     char *who_message[MAX_ROOMS] = {NULL};
-    char query[QUERY_LENGTH];
+    char *query = NULL;
+    sqlite3_stmt *stmt;
     int8_t command_length = 0;
 
     //Add control character to the start of message so we know when it's a
@@ -639,11 +635,10 @@ void process_clients(int server_socket){
                         if(strncmp(client_message, "/nick ", command_length = 6) == 0){
 
                             char *new_name = NULL;
+                            char *user_type = NULL;
                             char *password = NULL;
                             char *db_password = NULL;
                             char hashed_password[crypto_pwhash_STRBYTES];
-                            char *user_type = NULL;
-                            char *error_message = NULL;
 
                             //Get username and one password from client's message
                             get_username_and_passwords(command_length, client_message, &new_name, &password, NULL);
@@ -661,19 +656,19 @@ void process_clients(int server_socket){
                                 continue;
                             }
 
-                            //Check if username is registered in database     
-                            snprintf(query, QUERY_LENGTH, "SELECT password FROM users WHERE id = '%s';", new_name);
-                            status = sqlite3_exec(user_db, query, callback, &db_password, &error_message);
-                            if(status != SQLITE_OK){
-                                //Print SQL error to the server terminal
-                                fprintf(stderr, "SQL query error: %s\n", error_message);
-                                sqlite3_free(error_message);
+                            //Check if username is registered in database 
+                            query = "SELECT password FROM users WHERE id = ?1;";
+                            sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                            sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+                            if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+                                db_password = strdup((char *) sqlite3_column_text(stmt, 0));
+                                //printf("The SQL query returned: %s\n", db_password);
+                            }else if(status != SQLITE_DONE){
+                                fprintf(stderr, "SQL error while getting password: %s\n", sqlite3_errmsg(user_db));
                             }
+                            sqlite3_finalize(stmt);
 
                             if(db_password){ //Username requires a password
-                                /* DEBUG PRINT */
-                                printf("The SQL query returned: %s\n", db_password);
-                                /* ----------- */
 
                                 //Return error message if client did not specify a password
                                 if(password == NULL){
@@ -682,12 +677,14 @@ void process_clients(int server_socket){
                                     free(db_password);
                                     continue;
                                 }
-
+ 
                                 //Check if password is valid
                                 if(!is_password_valid(password, server_message)){
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    
                                     //Clear the plain-text password from memory
-                                    memset(client_message, 0, MESSAGE_LENGTH);
+                                    secure_zero(client_message, MESSAGE_LENGTH);
+                                    free(db_password);
                                     continue;     
                                 }
 
@@ -695,9 +692,10 @@ void process_clients(int server_socket){
                                 if(crypto_pwhash_str_verify(db_password, password, strlen(password)) != 0){
                                     sprintf(server_message, "Server: The specified password was incorrect");
                                     send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                    free(db_password);
+
                                     //Clear the plain-text password from memory
-                                    memset(client_message, 0, MESSAGE_LENGTH);
+                                    secure_zero(client_message, MESSAGE_LENGTH);
+                                    free(db_password);
                                     continue;
                                 }
 
@@ -709,32 +707,37 @@ void process_clients(int server_socket){
                                         fprintf(stderr, "Ran out of memory during hash function\n");
                                         exit(EXIT_FAILURE);
                                     }
-                                    
-                                    //Change password for the registered user
-                                    snprintf(query, QUERY_LENGTH, "UPDATE users SET password = '%s' WHERE id = '%s';", hashed_password, new_name);
-                                    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-                                    if(status != SQLITE_OK){
-                                        fprintf(stderr, "SQL query error: %s\n", error_message);
-                                        sqlite3_free(error_message);
+
+                                    //Update the rehashed password for the registered user
+                                    query = "UPDATE users SET password = ?1 WHERE id = ?2;";
+                                    sqlite3_prepare(user_db, query, -1, &stmt, NULL);
+                                    sqlite3_bind_text(stmt, 1, hashed_password, -1, SQLITE_STATIC);
+                                    sqlite3_bind_text(stmt, 2, new_name, -1, SQLITE_STATIC);
+                                    if(sqlite3_step(stmt) != SQLITE_DONE){
+                                        fprintf(stderr, "SQL error while updating password: %s\n", sqlite3_errmsg(user_db));
+
                                         //Clear the plain-text password from memory
-                                        memset(client_message, 0, MESSAGE_LENGTH);
+                                        secure_zero(client_message, MESSAGE_LENGTH);
+                                        free(db_password);
+                                        sqlite3_finalize(stmt);
                                         continue;
                                     }
-                                }
-
-                                //Get user type from the database
-                                snprintf(query, QUERY_LENGTH, "SELECT type FROM users WHERE id = '%s';", new_name);
-                                status = sqlite3_exec(user_db, query, callback, &user_type, &error_message);
-                                if(status != SQLITE_OK){
-                                    //Print SQL error to the server terminal
-                                    fprintf(stderr, "SQL query error: %s\n", error_message);
-                                    sqlite3_free(error_message);
+                                    sqlite3_finalize(stmt);
                                 }
 
                                 free(db_password);
 
-                            }else{ //Username is not registered
-                                printf("The SQL query had no results\n");
+                                //Get user type from the database
+                                query = "SELECT type FROM users WHERE id = ?1;";
+                                sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                                sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+                                if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+                                    user_type = strdup((char *) sqlite3_column_text(stmt, 0));
+                                    printf("User Type: %s\n", user_type);
+                                }else if(status != SQLITE_DONE){
+                                    fprintf(stderr, "SQL error while getting user type: %s\n", sqlite3_errmsg(user_db));    
+                                }
+                                sqlite3_finalize(stmt);
                             }
                             
                             //Check if username is already in use on the server
@@ -748,8 +751,9 @@ void process_clients(int server_socket){
                             if(name_in_use){
                                 sprintf(server_message, "Server: The username \"%s\" is currently in use", new_name);
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                
                                 //Clear the plain-text password from memory
-                                memset(client_message, 0, MESSAGE_LENGTH);
+                                secure_zero(client_message, MESSAGE_LENGTH);
                                 continue;
                             }     
 
@@ -780,8 +784,7 @@ void process_clients(int server_socket){
                             }
 
                             //Clear the plain-text password from memory
-                            memset(client_message, 0, MESSAGE_LENGTH);
-                            
+                            secure_zero(client_message, MESSAGE_LENGTH);
                             continue;
                         }
 
@@ -969,8 +972,7 @@ void process_clients(int server_socket){
                             char *password = NULL;
                             char *password2 = NULL;
                             char hashed_password[crypto_pwhash_STRBYTES];
-                            char *error_message = NULL;
-                            char *has_result = NULL;
+                            bool user_exists = false;
 
                             //Get username and passwords from client's message
                             get_username_and_passwords(command_length, client_message, &new_name, &password, &password2);
@@ -994,22 +996,28 @@ void process_clients(int server_socket){
                             }
                               
                             //Check if username already exists in database
-                            snprintf(query, QUERY_LENGTH, "SELECT id FROM users WHERE id = '%s';", new_name);
-                            status = sqlite3_exec(user_db, query, callback, &has_result, &error_message);
-                            if(status != SQLITE_OK){
-                                fprintf(stderr, "SQL query error: %s\n", error_message);
-                                sqlite3_free(error_message);
-                            }else if(has_result){
+                            query = "SELECT id FROM users WHERE id = ?1;";
+                            sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                            sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+                            if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+                                user_exists = true;
+                            }else if(status != SQLITE_DONE){
+                                fprintf(stderr, "SQL error while checking if username exists: %s\n", sqlite3_errmsg(user_db));
+                            }
+                            sqlite3_finalize(stmt);
+                            
+                            if(user_exists){
                                 
                                 //Check if client is currently the registered database user
                                 if(strcmp(username, new_name) == 0){
 
                                     //Change password for the registered user
-                                    snprintf(query, QUERY_LENGTH, "UPDATE users SET password = '%s' WHERE id = '%s';", hashed_password, username);
-                                    status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-                                    if(status != SQLITE_OK){
-                                        fprintf(stderr, "SQL query error: %s\n", error_message);
-                                        sqlite3_free(error_message);
+                                    query = "UPDATE users SET password = ?1 WHERE id = ?2;";
+                                    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                                    sqlite3_bind_text(stmt, 1, hashed_password, -1, SQLITE_STATIC);
+                                    sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC);
+                                    if(sqlite3_step(stmt) != SQLITE_DONE){
+                                        fprintf(stderr, "SQL error while changing user password: %s\n", sqlite3_errmsg(user_db));
                                     }else{
                                         //Print password change message to server's terminal
                                         printf("**%s on socket %d changed their password**\n", username, client_socket);
@@ -1018,6 +1026,7 @@ void process_clients(int server_socket){
                                         sprintf(server_message, "Server: Your username password has been changed");
                                         send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                     }
+                                    sqlite3_finalize(stmt);
 
                                 }else{
                                     //Inform client that username is already registered
@@ -1028,25 +1037,25 @@ void process_clients(int server_socket){
                             }else{
 
                                 //Register username into database
-                                snprintf(query, QUERY_LENGTH, "INSERT INTO users(id, password, type) VALUES('%s', '%s', 'user');", new_name, hashed_password);
-                                status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-                                if(status != SQLITE_OK){
-                                    fprintf(stderr, "SQL query error: %s\n", error_message);
-                                    sqlite3_free(error_message);
+                                query = "INSERT INTO users(id, password, type) VALUES(?1, ?2, 'user');";
+                                sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                                sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
+                                sqlite3_bind_text(stmt, 2, hashed_password, -1, SQLITE_STATIC);
+                                if(sqlite3_step(stmt) != SQLITE_DONE){
+                                        fprintf(stderr, "SQL error while registering username: %s\n", sqlite3_errmsg(user_db));
                                 }else{
                                     //Print username registration message to server's terminal
                                     printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
 
                                     //Inform client of username registration
                                     sprintf(server_message, "Server: You have registered the username \"%s\"", new_name);
-                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
+                                    send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);    
                                 }
-
+                                sqlite3_finalize(stmt);
                             }
 
                             //Clear the plain-text passwords from memory
-                            memset(client_message, 0, MESSAGE_LENGTH);
-
+                            secure_zero(client_message, MESSAGE_LENGTH);
                             continue;
                         }
 
@@ -1064,7 +1073,6 @@ void process_clients(int server_socket){
                             pthread_mutex_lock(&shutdown_lock);
                             shutdown_server = true;
                             pthread_mutex_unlock(&shutdown_lock);
-                            
                             continue;
                         }
 
@@ -1080,17 +1088,16 @@ void process_clients(int server_socket){
 
                             char *target_name = NULL;
                             char *user_type = NULL;
-                            char *error_message = NULL;
-                            char type_change[6] = {'\0'};
+                            char *type_change = NULL;
 
-                            //Check if client isn't an admin (Allow usage for all admin accounts)
+                            //Allow usage for all admin accounts
                             /*if(!user->is_admin){
                                 sprintf(server_message, "Server: Only server admins can use the /admin command");
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }*/
 
-                            //Check if client isn't the master admin (Allow usage for master admin account only)
+                            //Allow usage for main admin account only
                             if(strcmp(username, "Admin") != 0){
                                 sprintf(server_message, "Server: Only the \"Admin\" account can use the /admin command");
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
@@ -1106,42 +1113,55 @@ void process_clients(int server_socket){
                                 continue;
                             }   
 
-                            //Check if client is the targeted user
-                            if(strcmp(username, target_name) == 0){
+                            //Check if targeted user is the client
+                            if(strcmp(target_name, username) == 0){
                                 //Inform client that changing their own account is prohibited
                                 sprintf(server_message, "Server: Chaning your own account type is prohibited");
                                 send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
 
-                            //Check if username is registered in database
-                            snprintf(query, QUERY_LENGTH, "SELECT type FROM users WHERE id = '%s';", target_name);
-                            status = sqlite3_exec(user_db, query, callback, &user_type, &error_message);
-                            if(status != SQLITE_OK){
-                                fprintf(stderr, "SQL query error: %s\n", error_message);
-                                sqlite3_free(error_message);
+                            //Check if targeted user is the main admin account
+                            if(strcmp(target_name, "Admin") == 0){
+                                //Inform client that changing the main admin account is prohibited
+                                sprintf(server_message, "Server: Changing the main admin account type is prohibited");
+                                send_message(client_socket, server_message_prefixed, strlen(server_message_prefixed) + 1);
                                 continue;
                             }
+
+                            //Check if username is registered in database and get user type
+                            query = "SELECT type FROM users WHERE id = ?1;";
+                            sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                            sqlite3_bind_text(stmt, 1, target_name, -1, SQLITE_STATIC);
+                            if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+                                user_type = strdup((char *) sqlite3_column_text(stmt, 0));
+                            }else if(status != SQLITE_DONE){
+                                fprintf(stderr, "SQL error while getting user type: %s\n", sqlite3_errmsg(user_db));
+                            }
+                            sqlite3_finalize(stmt);
 
                             if(user_type){
                                 
                                 //Get the account type to switch to
                                 if(strcmp(user_type, "admin") == 0){
-                                    strcpy(type_change, "user");
+                                    type_change = "user";
                                 }else{
-                                    strcpy(type_change, "admin");
+                                    type_change = "admin";
                                 }
 
                                 free(user_type);
 
                                 //Switch targeted user's account type in database
-                                snprintf(query, QUERY_LENGTH, "UPDATE users SET type = '%s' WHERE id = '%s';", type_change, target_name);
-                                status = sqlite3_exec(user_db, query, callback, NULL, &error_message);
-                                if(status != SQLITE_OK){
-                                    fprintf(stderr, "SQL query error: %s\n", error_message);
-                                    sqlite3_free(error_message);
+                                query = "UPDATE users SET type = ?1 WHERE id = ?2;";
+                                sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+                                sqlite3_bind_text(stmt, 1, type_change, -1, SQLITE_STATIC);
+                                sqlite3_bind_text(stmt, 2, target_name, -1, SQLITE_STATIC);
+                                if(sqlite3_step(stmt) != SQLITE_DONE){
+                                    fprintf(stderr, "SQL error while changing user type: %s\n", sqlite3_errmsg(user_db));
+                                    sqlite3_finalize(stmt); 
                                     continue;
                                 }
+                                sqlite3_finalize(stmt);
 
                                 //Look for user on server and change account type if located
                                 table_entry_t *user = NULL;
@@ -1154,13 +1174,12 @@ void process_clients(int server_socket){
                                         //Inform targeted user of account type change
                                         sprintf(server_message, "Server: Your account has changed to \"%s\" type", type_change);
                                         send_message(user->socket_fd, server_message_prefixed, strlen(server_message_prefixed) + 1);
-                                        
                                         break;
                                     }
                                 }
 
                                 //Print account type change message to server's terminal
-                                printf("**Account \"%s\" changed to %s type**\n", target_name, type_change);
+                                printf("**Account \"%s\" changed to \"%s\" type**\n", target_name, type_change);
                                 
                                 //Inform client of account type change
                                 sprintf(server_message, "Server: Account \"%s\" changed to \"%s\" type", target_name, type_change);
@@ -1650,16 +1669,12 @@ int id_compare(table_entry_t *a, table_entry_t *b){
     return (strcasecmp(a->id, b->id));
 }
 
-static int callback(void *result, int argc, char **argv, char **azColName){
-    
-    /*//DEBUG PRINT
-    for(int i = 0; i < argc; i++){
-      printf("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
-    }*/
-
-    if(result != NULL){
-        *((char **) result) = strdup(argv[0] ? argv[0] : "NULL");
-    }
-
-    return 0;
+//Function used to clear passwords from memory
+void secure_zero(void *s, size_t n){
+    volatile char *p = s;
+    while(n > 0){
+        *p = 0;
+        p++;
+        n--;
+    } 
 }
