@@ -1,9 +1,10 @@
 CC = gcc
 CFLAGS = -I.
-DEPS = tcpClient.h
+DEPS = chatClient.h tcpClient.h
+OBJ = chatClient.o tcpClient.o
 
 %.o: %.c $(DEPS)
 	$(CC) -g -O0 -c -o $@ $< $(CFLAGS)
 
-chat_client: chatClient.o tcpClient.o
-	$(CC) -g -O0 -Wall -pedantic -o chatClient chatClient.c tcpClient.c -lncurses -lpthread
+chatClient: $(OBJ)
+	$(CC) -g -O0 -Wall -pedantic -o $@ $^ $(CFLAGS) -lncurses -lpthread

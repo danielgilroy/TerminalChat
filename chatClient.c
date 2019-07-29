@@ -1,52 +1,55 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <time.h>
-
-#include <pthread.h>
-#include <signal.h>
-#include <ncurses.h>
-
+#include "chatClient.h"
 #include "tcpClient.h"
-
-#define MESSAGE_LENGTH 256
-#define MESSAGE_START 0x02
-
-void initializeChat();
-void initializeConnection();
-void terminateChat();
-void terminateChatNow();
-void *incomingMessages();
-void outgoingMessages();
-void printToChat(char *, int);
-void printTime();
-static void handler(int);
-void *printMessage();
 
 WINDOW *chat_win;
 pthread_t tid;
+pthread_mutex_t connected_lock;
+pthread_mutex_t print_lock;
+bool connected = false;
 
-int main(){
+int main(int argc, char *argv[]){
 
-    initializeChat();
-    initializeConnection();
-        
+    //Setup signal handlers for CTRL+C and CTRL+BACKSLASH
+    signal(SIGINT, sig_handler); 
+    signal(SIGQUIT, sig_handler); 
+
+    initialize_chat();
+
+    //Initialize connection with user-specified IP and port
+    if(argc > 2){
+        initialize_connection(argv[1], atoi(argv[2]));
+    }else if(argc > 1){
+        //Check if the first argument is an IP address
+        char *first_argument = argv[1];
+        if(strchr(first_argument, '.') || strchr(first_argument, ':')){
+            initialize_connection(first_argument, DEFAULT_PORT_NUMBER);
+        }else{
+            initialize_connection(DEFAULT_IP_ADDRESS, atoi(first_argument));
+        }
+    }else{
+        initialize_connection(DEFAULT_IP_ADDRESS, DEFAULT_PORT_NUMBER);
+    }
+
     //Setup signal handler and create thread for incoming messages
+    pthread_mutex_init(&connected_lock, NULL);
+    pthread_mutex_init(&print_lock, NULL);
     signal(SIGUSR1, handler);
-    pthread_create(&tid, NULL, incomingMessages, NULL);
+    pthread_create(&tid, NULL, incoming_messages, NULL);
 
-    outgoingMessages();
-    terminateChat();
+    outgoing_messages();
+
+    pthread_mutex_destroy(&connected_lock);
+    pthread_mutex_destroy(&print_lock);
+    terminate_chat();
 
     return 0;
 }
 
-void initializeChat(){
+void initialize_chat(){
 
     initscr();
-    raw();
-    //noraw();
+    //raw();
+    noraw();
     //cbreak();
     //nocbreak(); 
     keypad(stdscr, TRUE);
@@ -65,24 +68,26 @@ void initializeChat(){
     wrefresh(stdscr);
 }
 
-void initializeConnection(){
+void initialize_connection(char *ip, int port){
     int bytes_recv;
     char response[MESSAGE_LENGTH];
 
-    bytes_recv = joinServer(response);    
+    bytes_recv = join_server(ip, port, response);    
 
     if (bytes_recv < 0){
-        wprintw(chat_win, "\n\n    -There was an error connecting to the server-\n");
-        wprintw(chat_win, "        -The chat client will close shortly-\n");
+        wprintw(chat_win, "\n\n   %s\n", response); 
+        wprintw(chat_win, "      -Ensure IP address and port number are correct-\n");
+        wprintw(chat_win, "            -The chat client will close shortly-\n");
         wrefresh(chat_win);
-        sleep(3);
-        terminateChat();
+        sleep(10);
+        terminate_chat();
     }
 
-    printToChat(response, bytes_recv);
+    connected = true;
+    print_to_chat(response, bytes_recv);
 }
 
-void terminateChat(){
+void terminate_chat(){
 
     if(tid){
         pthread_kill(tid, SIGUSR1); //Send signal for thread to exit
@@ -94,12 +99,12 @@ void terminateChat(){
 }
 
 /* TEMPORARY FIX - HANDLE CLOSING OF THREAD BETTER WHEN CALLED FROM WIHIN THAT THREAD */
-void terminateChatNow(){
+void terminate_chat_now(){
     endwin();
     exit(0);
 }
 
-void *incomingMessages(){
+void *incoming_messages(){
 
     int bytes_recv;
     char server_message[MESSAGE_LENGTH + 1];
@@ -107,19 +112,23 @@ void *incomingMessages(){
      
     while(1){
 
-        bytes_recv = receiveMessage(server_message, MESSAGE_LENGTH);
+        bytes_recv = receive_message(server_message, MESSAGE_LENGTH);
     
-        if(bytes_recv == 0){
-            wprintw(chat_win, "\n\n       -The connection to the server has been lost-\n");
-            wprintw(chat_win, "          -Type /quit to close the chat client-\n");
+        if(bytes_recv <= 0){
+            if(bytes_recv == 0){
+                wprintw(chat_win, "\n\n       -The connection to the server has been lost-\n");
+                wprintw(chat_win, "          -The chat client will close shortly-\n");
+            }else{
+                wprintw(chat_win, "\n\n  -An unknown error has occurred-\n");
+                wprintw(chat_win, "-The chat client will close shortly-\n");
+            }
+            
             wrefresh(chat_win);
-            return NULL;  
-        }else if(bytes_recv == -1){
-            wprintw(chat_win, "\n\n  -An unknown error has occurred-\n");
-            wprintw(chat_win, "-The chat client will close shortly-\n");
-            wrefresh(chat_win);
-            sleep(5);
-            terminateChatNow();  
+            pthread_mutex_lock(&connected_lock);
+            connected = false;
+            pthread_mutex_unlock(&connected_lock);
+            sleep(10);
+            terminate_chat_now();  
         }
 
         /* //DEBUG PRINT
@@ -129,26 +138,28 @@ void *incomingMessages(){
         wrefresh(chat_win); 
         */
 
-        printToChat(server_message, bytes_recv);
+        print_to_chat(server_message, bytes_recv);
     }
 }
 
-void outgoingMessages(){
+void outgoing_messages(){
 
     int status;
     char user_message[MESSAGE_LENGTH];
     size_t message_length;
 
     do{
-
+        
         //Get input string from the user
         getnstr(user_message, COLS - 5);
 
         //Move cursor to starting position and clear the line
+        pthread_mutex_lock(&print_lock);
         wmove(stdscr, LINES-1, 6);
         clrtoeol();
         wrefresh(chat_win);
         wrefresh(stdscr);
+        pthread_mutex_unlock(&print_lock);
 
         if(user_message[0] == '\0'){
             //Message is blank so ignore it
@@ -201,13 +212,17 @@ void outgoingMessages(){
         //a new message since the message may be split up over multiple packets
         //message[0] = 0x02; //Start of text control character
 
-        message_length = strlen(user_message);
-            
-        status = sendMessage(user_message, message_length + 1);
-        if(status == -1){
-            perror("Error");
-            //terminateChat();
+        pthread_mutex_lock(&connected_lock);
+        if(connected){
+            pthread_mutex_unlock(&connected_lock);
+
+            message_length = strlen(user_message);
+            status = send_message(user_message, message_length + 1);
+            if(status == -1){
+                perror("Error");
+            }
         }
+        pthread_mutex_unlock(&connected_lock);
 
         wrefresh(chat_win);
         wrefresh(stdscr);
@@ -218,18 +233,25 @@ void outgoingMessages(){
     wrefresh(chat_win); 
 }
 
-void printToChat(char * message, int bytes){
+void print_to_chat(char * message, int bytes){
 
     int length = 0;
     while(bytes > 0){
-        //wprintw(chat_win, "\n%d\n", bytes);
         if(message[0] == MESSAGE_START){
+            pthread_mutex_lock(&print_lock);
             wprintw(chat_win, "\n");
-            printTime(); 
+            print_time(); 
+            wrefresh(chat_win);
+            wrefresh(stdscr);
+            pthread_mutex_unlock(&print_lock);
             message++;
             bytes--;
         }
+        pthread_mutex_lock(&print_lock);
         wprintw(chat_win, "%s", message);
+        wrefresh(chat_win);
+        wrefresh(stdscr);
+        pthread_mutex_unlock(&print_lock);
         length = strlen(message); 
         message += length + 1; //Move to next string - Add one to skip over the null character
         if(length == bytes){
@@ -239,11 +261,11 @@ void printToChat(char * message, int bytes){
         }
     }
 
-    wrefresh(chat_win); //Show message on chat window
-    wrefresh(stdscr); //Ensures cursor in text window is show
+    //wrefresh(chat_win); //Show message on chat window
+    //wrefresh(stdscr); //Ensures cursor in text window is show
 }
 
-void printTime(){
+void print_time(){
     time_t raw_time = time(NULL);
     struct tm *cur_time;
 
@@ -257,26 +279,10 @@ void printTime(){
     wrefresh(stdscr); 
 }
 
-static void handler(int signum){
+static void handler(int sig_num){
 	pthread_exit(NULL);
 }
 
-
-
-/* Debugging method */
-void *printMessage(){
-
-    int i = 0;
-
-    sleep(2); //Delay before starting to send messages
-           
-    while(1){
-
-        sleep(1); //Delay between each message
-        i++;
-        wprintw(chat_win, "BobBot: For the #%d time, how are you?\n", i);
-        wrefresh(chat_win);
-        wrefresh(stdscr); //Ensures cursor in text window is show
-
-    }
+static void sig_handler(int sig_num){
+    terminate_chat_now();
 }
