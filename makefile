@@ -1,5 +1,10 @@
 CC = gcc
 CFLAGS = -I.
+DEPS = chatServer.h chatServerUtils.h uthash.h
+OBJ = chatServer.o chatServerUtils.o
 
-chatServer: chatServer.c
-	$(CC) -g -O0 -Wall -pedantic -o chatServer chatServer.c -lpthread -lsqlite3 -lsodium
+%.o: %.c $(DEPS)
+	$(CC) -g -O0 -c -o $@ $< $(CFLAGS)
+
+chatServer: $(OBJ)
+	$(CC) -g -O0 -Wall -pedantic -o $@ $^ $(CFLAGS) -lpthread -lsqlite3 -lsodium
