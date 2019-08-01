@@ -1,6 +1,45 @@
 #include "chatServer.h"
 #include "chatServerUtils.h"
 
+char *prepare_client_message(char *client_message, int recv_status){
+
+    //Replace ending \n with \0 or ending \r\n with \0\0
+    if(client_message[recv_status-1] == '\n'){
+        client_message[recv_status-1] = '\0';
+        if(recv_status > 1 && client_message[recv_status-2] == '\r'){
+            client_message[recv_status-2] = '\0';
+            recv_status--;
+        }
+    }     
+
+    //Null terminate message if it didn't have \n, \r\n, or \0 already
+    if(client_message[recv_status - 1] != '\0'){
+        client_message[recv_status] = '\0';
+    }
+    
+    return client_message;
+}
+
+char *add_username_to_message(char *message, char *username, char *suffix){
+//NOTE: Calling function must call free on the allocated memory
+
+    size_t length = 1 + USERNAME_LENGTH + strlen(suffix) + MESSAGE_LENGTH + 1;
+    char *message_result = malloc(length);
+    if(message_result == NULL){
+        fprintf(stderr, "Error allocating memory");
+        exit(EXIT_FAILURE);
+    }
+    
+    //Add a control character to start of message so we know when it's a new message
+    message_result[0] = MESSAGE_START;
+    message_result[1] = '\0';
+    strncat(message_result, username, length);
+    strncat(message_result, suffix, length);
+    strncat(message_result, message, length);
+    message_result[length - 1] = '\0'; //Ensure NULL termination
+    return message_result;
+}
+
 int send_message(int socket, char *message, int message_length){
 
     int bytes_sent = 0;
@@ -33,26 +72,6 @@ int send_message_to_all(int room_id, char *message, int message_length){
     }                                                            
 
     return status;
-}
-
-char *add_username_to_message(char *message, char *username, char *suffix){
-//NOTE: Calling function must call free on the allocated memory
-
-    size_t length = 1 + USERNAME_LENGTH + strlen(suffix) + MESSAGE_LENGTH + 1;
-    char *message_result = malloc(length);
-    if(message_result == NULL){
-        fprintf(stderr, "Error allocating memory");
-        exit(EXIT_FAILURE);
-    }
-    
-    //Add a control character to start of message so we know when it's a new message
-    message_result[0] = MESSAGE_START;
-    message_result[1] = '\0';
-    strncat(message_result, username, length);
-    strncat(message_result, suffix, length);
-    strncat(message_result, message, length);
-    message_result[length - 1] = '\0'; //Ensure NULL termination
-    return message_result;
 }
 
 void print_time(){
@@ -206,43 +225,62 @@ int is_username_restricted(char *username, char *error_message){
     return 1;
 }
 
-void rebuild_who_message(char** who_message, int room_id){
+void rebuild_who_message(char **who_messages, int room_id){
 
     size_t who_message_length;
+    static size_t allocated_lengths[MAX_ROOMS];
+
+    if(who_messages == NULL){
+        fprintf(stderr, "Error in rebuild_who_message(): who_messages is NULL\n"); 
+        return;
+    }
+
+    //Perform initial allocation of memory if needed
+    if(who_messages[room_id] == NULL){
+        who_messages[room_id] = malloc(WHO_MESSAGE_LENGTH * sizeof(**who_messages));
+        if(who_messages[room_id] == NULL){
+            fprintf(stderr, "Error allocating memory for room #%d who_message\n", room_id);
+            exit(0);
+        }
+        allocated_lengths[room_id] = WHO_MESSAGE_LENGTH;
+        who_messages[room_id][0] = '\0'; //Set who_message to rebuild state
+    }
 
     //Check if the list of users needs to be rebuilt
-    if(who_message[room_id][0] == '\0'){
+    if(who_messages[room_id][0] == '\0'){
 
         //Insert MESSAGE_START character
-        who_message[room_id][0] = MESSAGE_START;
-        //sprintf(who_message[room_id] + 1, "Server: Room #%d ", room_id);
-        sprintf(who_message[room_id] + 1, "Room #%02d: ", room_id);
+        who_messages[room_id][0] = MESSAGE_START;
+        sprintf(who_messages[room_id] + 1, "Room #%02d: ", room_id);
         
         //Check if chat room has users
         int room_user_count = HASH_COUNT(active_users[room_id]);
         if(room_user_count == 0){
-            strncat(who_message[room_id], "Empty", WHO_MESSAGE_LENGTH);
+            strncat(who_messages[room_id], "Empty", WHO_MESSAGE_LENGTH);
         }else{
 
             //Get who_message string length - Add extra 1 for null character
-            who_message_length = strlen(who_message[room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
+            who_message_length = strlen(who_messages[room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
 
             //Allocate memory for the string if it's longer than initial allocated size
-            if(who_message_length > WHO_MESSAGE_LENGTH){
-                printf("realloc to %lu\n", who_message_length);
-                char *new_ptr = realloc(who_message[room_id], who_message_length);
+            if(who_message_length > allocated_lengths[room_id]){
+                /* DEBUG STATEMENT */
+                //printf("realloc room #%d to %lu\n", room_id, who_message_length);
+                /* --------------- */
+                char *new_ptr = realloc(who_messages[room_id], who_message_length * sizeof(**who_messages));
                 if(new_ptr == NULL){
                     fprintf(stderr, "Error allocating memory for who_message\n");
                     exit(0);
                 }
-                who_message[room_id] = new_ptr;
+                who_messages[room_id] = new_ptr;
+                allocated_lengths[room_id] = who_message_length;
             } 
 
             //Itterate through the hash table and append usernames
             table_entry_t *user;
             for(user = active_users[room_id]; user != NULL; user = user->hh.next) {
-                strncat(who_message[room_id], user->id, WHO_MESSAGE_LENGTH);
-                strncat(who_message[room_id], " ", WHO_MESSAGE_LENGTH);
+                strncat(who_messages[room_id], user->id, who_message_length);
+                strncat(who_messages[room_id], " ", who_message_length);
             }
         }
     }
@@ -254,8 +292,8 @@ void remove_user(int room_id, table_entry_t *user){
     
     //Clear spam timeout and message count so new users using the same spot aren't affected
     pthread_mutex_lock(&spam_lock);
-    spam_timeout[i] = 0;
     spam_message_count[i] = 0;
+    spam_timeout[i] = 0;
     pthread_mutex_unlock(&spam_lock);
 
     //Close the client socket

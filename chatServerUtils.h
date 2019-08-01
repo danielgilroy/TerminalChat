@@ -1,9 +1,10 @@
 #ifndef CHAT_SERVER_UTILS_H
 #define CHAT_SERVER_UTILS_H
 
+char *prepare_client_message(char *, int);
+char *add_username_to_message(char *, char *, char *);
 int send_message(int, char *, int);
 int send_message_to_all(int, char *, int);
-char *add_username_to_message(char *, char *, char *);
 void print_time();
 int check_status(int, char *);
 void get_username_and_passwords(int, char *, char **, char **, char **);

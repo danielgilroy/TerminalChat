@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -I.
-DEPS = chatServer.h chatServerUtils.h uthash.h
-OBJ = chatServer.o chatServerUtils.o
+DEPS = chatServer.h chatServerUtils.h chatServerCommands.h uthash.h
+OBJ = chatServer.o chatServerUtils.o chatServerCommands.o
 
 %.o: %.c $(DEPS)
 	$(CC) -g -O0 -c -o $@ $< $(CFLAGS)
