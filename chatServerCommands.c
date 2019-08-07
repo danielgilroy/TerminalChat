@@ -94,6 +94,12 @@ void who_arg_cmd(int client_socket, char *client_msg, char *server_msg_prefixed,
     send_message(client_socket, who_messages[targeted_room_id], strlen(who_messages[targeted_room_id]) + 1);
 }
 
+void join_cmd(int client_socket, char *server_msg_prefixed){
+    char *server_msg = server_msg_prefixed + 1;
+    sprintf(server_msg, "Server: Type \"/join <room_number>\" to join a room");
+    send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
+}
+
 void join_arg_cmd(table_entry_t *user, int room_id, char *client_msg, char *server_msg_prefixed, char **who_messages){
 
     int client_socket = user->socket_fd;
@@ -451,7 +457,7 @@ void kick_arg_cmd(table_entry_t *user, table_entry_t *tmp, int room_id, int cmd_
 
 void register_cmd(int client_socket, char *server_msg_prefixed){
     char *server_msg = server_msg_prefixed + 1;
-    sprintf(server_msg, "Server: Type \"/register <username> <password> <password>\"");
+    sprintf(server_msg, "Server: Type \"/register <username> <password> <password>\" to register");
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
 }
 

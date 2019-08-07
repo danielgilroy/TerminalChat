@@ -86,14 +86,6 @@ void print_time(){
     printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
 }
 
-int check_status(int status, char *error){
-    if(status == -1){
-        perror(error);
-        exit(EXIT_FAILURE);
-    }
-    return status;
-}
-
 void get_username_and_passwords(int cmd_length, char *client_message, char **new_name, char **password, char **password2){
     
     //Skip over command in client's message
@@ -345,6 +337,13 @@ void delete_user(int room_id, table_entry_t *user) {
 
 int id_compare(table_entry_t *a, table_entry_t *b){
     return (strcasecmp(a->id, b->id));
+}
+
+int check_status(int status, char *error){
+    if(status == -1){
+        perror(error);
+    }
+    return status;
 }
 
 //Function used to clear passwords from memory

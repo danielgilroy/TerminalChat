@@ -5,6 +5,7 @@ void whois_cmd(table_entry_t *, char *);
 void whois_arg_cmd(table_entry_t *, int, int, char *, char *);
 void who_cmd(int, char **);
 void who_arg_cmd(int, char *, char *, char **);
+void join_cmd(int, char *);
 void join_arg_cmd(table_entry_t *, int, char *, char *, char **);
 void nick_cmd(int, char *, char *);
 void nick_arg_cmd(table_entry_t *, int, int, char *, char *, char **);

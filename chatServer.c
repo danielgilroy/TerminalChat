@@ -16,8 +16,14 @@ sqlite3 *user_db;
 
 bool shutdown_server_flag = false;
 pthread_mutex_t shutdown_lock;
+unsigned int port_number = DEFAULT_PORT_NUMBER;
 
-int main(){
+int main(int argc, char* argv[]){
+    
+    //Get port number from argument
+    if(argc > 1){
+        port_number = atoi(argv[1]);
+    }
 
     pthread_mutex_init(&shutdown_lock, NULL);
     pthread_mutex_init(&spam_lock, NULL);
@@ -152,7 +158,7 @@ void start_server(){
     //Define the server's IP address and port
     struct sockaddr_in server_address;
     server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(PORT_NUMBER);
+    server_address.sin_port = htons(port_number);
     server_address.sin_addr.s_addr = htonl(INADDR_ANY);
     memset(server_address.sin_zero, 0, sizeof(server_address.sin_zero));
 
@@ -169,7 +175,21 @@ void start_server(){
 
     //Bind the socket to our specified IP address and port
     status = bind(server_socket, (struct sockaddr*) &server_address, sizeof(server_address));
-    check_status(status, "Error binding server socket");
+    if(check_status(status, "\nError binding server socket")){
+        fprintf(stderr, "Server will select an unused port instead of port %d\n", port_number);
+        server_address.sin_port = 0; //Set port to automatically find an unused port
+        status = bind(server_socket, (struct sockaddr*) &server_address, sizeof(server_address));
+        check_status(status, "Error binding server socket");
+    }
+
+    //Print the server port to the terminal
+    socklen_t len = sizeof(server_address);
+    if (getsockname(server_socket, (struct sockaddr *)&server_address, &len) == -1) {
+        perror("getsockname error");
+        return;
+    }    
+    port_number = ntohs(server_address.sin_port);
+    printf("Server is using port: %d\n\n", port_number);
 
     //Set the socket up to listen for connections
     status = listen(server_socket, LISTEN_BACKLOG);
@@ -330,6 +350,7 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
     char ip_str[INET_ADDRSTRLEN];
     unsigned short port;
     
+    
     while(1){
     
         //Check for any pending connections
@@ -475,6 +496,10 @@ void process_clients(char *client_msg, char *server_msg_prefixed, char **who_mes
                     }else if(strncmp(client_msg, "/who ", 5) == 0){
                         //List who's in the specified chat room
                         who_arg_cmd(client_socket, client_msg, server_msg_prefixed, who_messages);
+
+                    }else if(strcmp(client_msg, "/join") == 0){
+                        //Inform client of /join usage
+                        join_cmd(client_socket, server_msg_prefixed);
 
                     }else if(strncmp(client_msg, "/join ", 6) == 0){
                         //Join the user-specified chat room
