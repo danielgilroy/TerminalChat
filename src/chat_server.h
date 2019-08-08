@@ -21,7 +21,7 @@
 #include <sodium.h>
 #include <uthash.h>
 
-#define DEFAULT_PORT_NUMBER 9002 //Default port number to try before automatically finding an unused port
+#define DEFAULT_PORT_NUMBER 9852 //Default port number to try before automatically finding an unused port
 #define LISTEN_BACKLOG 10
 #define POLL_TIMEOUT 400 //Poll timeout in milliseconds: Reduce this if joining chat takes too long
 #define MAX_SOCKETS 256 //Max FD limit on linux is set to 1024 by default but can be changed

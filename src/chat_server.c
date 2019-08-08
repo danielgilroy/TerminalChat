@@ -1,6 +1,6 @@
-#include "chatServer.h"
-#include "chatServerUtils.h"
-#include "chatServerCommands.h"
+#include "chat_server.h"
+#include "chat_server_utils.h"
+#include "chat_server_commands.h"
 
 /* Extern Definitions */
 int socket_count = 0;
@@ -189,7 +189,7 @@ void start_server(){
         return;
     }    
     port_number = ntohs(server_address.sin_port);
-    printf("Server is using port: %d\n\n", port_number);
+    printf("Server is using port number: %d\n", port_number);
 
     //Set the socket up to listen for connections
     status = listen(server_socket, LISTEN_BACKLOG);

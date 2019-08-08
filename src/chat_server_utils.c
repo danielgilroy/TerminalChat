@@ -1,5 +1,5 @@
-#include "chatServer.h"
-#include "chatServerUtils.h"
+#include "chat_server.h"
+#include "chat_server_utils.h"
 
 char *prepare_client_message(char *client_message, int recv_status){
 
