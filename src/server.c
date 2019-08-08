@@ -1,6 +1,4 @@
-#include "chat_server.h"
-#include "chat_server_utils.h"
-#include "chat_server_commands.h"
+#include "server.h"
 
 /* Extern Definitions */
 int socket_count = 0;
@@ -295,15 +293,12 @@ void monitor_connections(int server_socket){
         //Monitor FDs for any activated events
         status = poll(socket_fds, MAX_SOCKETS, POLL_TIMEOUT);
         
-        //Timeout occurred: Clients don't have any events or errors
+        //Check if a timeout has occurred:
         if(status == 0){
-            /* DEBUG STATEMENT */
-            //printf("Client FDs: %d %d %d %d\n", socket_fds[0].fd, socket_fds[1].fd, socket_fds[2].fd, socket_fds[3].fd);
-            /* --------------- */
-            continue;
+            continue; //Clients don't have any events or errors
         }
 
-        //A poll error has occurred
+        //Check if a poll error has occurred
         if(status == -1){
             perror("Error");
             continue;
@@ -349,8 +344,7 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
     socklen_t client_addr_size = sizeof(client_addr);
     char ip_str[INET_ADDRSTRLEN];
     unsigned short port;
-    
-    
+        
     while(1){
     
         //Check for any pending connections
@@ -430,10 +424,6 @@ void process_clients(char *client_msg, char *server_msg_prefixed, char **who_mes
         //Itterate through all users in the chat room
         table_entry_t *user, *tmp;
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Uthash deletion-safe itteration
-
-            /* DEBUG STATEMENT */
-            //printf("Process %s in room %d\n", username, room_id);
-            /* --------------- */
 
             //Get index and username from user
             index = user->index;
@@ -556,7 +546,7 @@ void process_clients(char *client_msg, char *server_msg_prefixed, char **who_mes
                         sprintf(server_msg, "Server: \"%s\" is not a valid command", client_msg);
                         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
                     }
-
+                    
                 }else if(client_msg[0] == '\0'){// || client_msg[0] == '\r' || client_msg[0] == '\n'){
                     /* ----------------------------- */
                     /* Ignore client's empty message */
@@ -704,12 +694,6 @@ void public_message(int room_id, int recv_status, char *username, char *client_m
     print_time();
     printf("#%d ", room_id);
     printf("%s\n", message + 1); //Add one to skip MESSAGE_START character
-
-    /* SEND LOAD TEST */
-    // for(int i = 0; i < 10; i++){
-    //     send_message_to_all(room_id, message, recv_status + additional_length);
-    // }
-    /* -------------- */
     
     free(message);
     message = NULL;

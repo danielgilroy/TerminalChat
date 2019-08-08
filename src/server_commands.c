@@ -1,6 +1,4 @@
-#include "chat_server.h"
-#include "chat_server_utils.h"
-#include "chat_server_commands.h"
+#include "server_commands.h"
 
 void whois_cmd(table_entry_t *user, char *client_msg){
 

@@ -1,6 +1,9 @@
 #ifndef CHAT_SERVER_COMMANDS_H
 #define CHAT_SERVER_COMMANDS_H
 
+#include "server_shared.h"
+#include "server_utils.h"
+
 void whois_cmd(table_entry_t *, char *);
 void whois_arg_cmd(table_entry_t *, int, int, char *, char *);
 void who_cmd(int, char **);

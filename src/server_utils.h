@@ -1,6 +1,8 @@
 #ifndef CHAT_SERVER_UTILS_H
 #define CHAT_SERVER_UTILS_H
 
+#include "server_shared.h"
+
 char *prepare_client_message(char *, int);
 char *add_username_to_message(char *, char *, char *);
 int send_message(int, char *, int);

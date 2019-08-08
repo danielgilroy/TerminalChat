@@ -1,8 +1,8 @@
 CC = gcc
 CFLAGS = -I.
-DEPS = chat_server.h chat_server_utils.h chat_server_commands.h
-OBJ = $(OBJDIR)/chat_server.o $(OBJDIR)/chat_server_utils.o $(OBJDIR)/chat_server_commands.o
 DEBUG = -g -O0
+DEPS = server.h server_utils.h server_commands.h server_shared.h
+OBJ = $(OBJDIR)/server.o $(OBJDIR)/server_utils.o $(OBJDIR)/server_commands.o
 LIBS = -lpthread -lsqlite3 -lsodium
 
 VPATH = src
@@ -14,6 +14,7 @@ $(OBJDIR)/%.o: %.c $(DEPS)
 chatserver: $(OBJ)
 	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(CFLAGS) $(LIBS)
 
+.PHONY: clean
 clean:
 	rm -r chatserver $(OBJDIR)
 
