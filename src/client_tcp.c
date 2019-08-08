@@ -1,4 +1,4 @@
-#include "tcpClient.h"
+#include "client_tcp.h"
 
 int network_socket;
 

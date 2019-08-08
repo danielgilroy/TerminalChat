@@ -1,5 +1,4 @@
-#include "chatClient.h"
-#include "tcpClient.h"
+#include "client.h"
 
 WINDOW *chat_win;
 pthread_t tid;

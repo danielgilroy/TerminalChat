@@ -1,14 +1,21 @@
 CC = gcc
 CFLAGS = -I.
-DEPS = chatClient.h tcpClient.h
-OBJ = chatClient.o tcpClient.o
 DEBUG = -g -O0
+DEPS = client.h client_tcp.h
+OBJ = $(OBJDIR)/client.o $(OBJDIR)/client_tcp.o
+LIBS = -lpthread -lncurses
 
-%.o: %.c $(DEPS)
+VPATH = src
+OBJDIR = obj
+
+$(OBJDIR)/%.o: %.c $(DEPS)
 	$(CC) $(DEBUG) -c -o $@ $< $(CFLAGS)
 
-chatClient: $(OBJ)
-	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(CFLAGS) -lncurses -lpthread
+chatclient: $(OBJ)
+	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(CFLAGS) $(LIBS)
 
+.PHONY: clean
 clean:
-	rm chatClient $(OBJ)
+	rm -r chatclient $(OBJDIR)
+
+$(shell mkdir -p $(OBJDIR))
