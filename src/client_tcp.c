@@ -2,7 +2,7 @@
 
 int network_socket;
 
-int join_server(char *ip, int port, char *response){
+int join_server(char *ip, unsigned int port, char *response){
 
     int status;
 

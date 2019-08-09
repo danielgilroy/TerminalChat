@@ -1,45 +1,54 @@
 #include "client.h"
 
 WINDOW *chat_win;
-pthread_t tid;
+pthread_t incoming_tid;
 pthread_mutex_t connected_lock;
 pthread_mutex_t print_lock;
 bool connected = false;
+int input_length = 0;
 
 int main(int argc, char *argv[]){
 
+    char *ip = DEFAULT_IP_ADDRESS;
+    unsigned int port = DEFAULT_PORT_NUMBER;
+
     //Setup signal handlers for CTRL+C and CTRL+BACKSLASH
-    signal(SIGINT, sig_handler); 
-    signal(SIGQUIT, sig_handler); 
+    signal(SIGINT, shutdown_handler); 
+    signal(SIGQUIT, shutdown_handler); 
 
-    initialize_chat();
-
-    //Initialize connection with user-specified IP and port
+    //Get user-specified IP and port from CLI arguments
     if(argc > 2){
-        initialize_connection(argv[1], atoi(argv[2]));
+        ip = argv[1];
+        port = atoi(argv[2]);
     }else if(argc > 1){
         //Check if the first argument is an IP address
         char *first_argument = argv[1];
         if(strchr(first_argument, '.') || strchr(first_argument, ':')){
-            initialize_connection(first_argument, DEFAULT_PORT_NUMBER);
+            ip = first_argument;
         }else{
-            initialize_connection(DEFAULT_IP_ADDRESS, atoi(first_argument));
+            port = atoi(first_argument);
         }
-    }else{
-        initialize_connection(DEFAULT_IP_ADDRESS, DEFAULT_PORT_NUMBER);
     }
 
-    //Setup signal handler and create thread for incoming messages
+    initialize_chat();
+    initialize_connection(ip, port);
+
+    //Setup mutex locks and create thread for incoming messages
     pthread_mutex_init(&connected_lock, NULL);
     pthread_mutex_init(&print_lock, NULL);
-    signal(SIGUSR1, handler);
-    pthread_create(&tid, NULL, incoming_messages, NULL);
+    pthread_create(&incoming_tid, NULL, incoming_messages, NULL);
+
+    //Detach incoming message thread
+    if(pthread_detach(incoming_tid)){
+        perror("Thread detaching error");
+        exit(EXIT_FAILURE);
+    }
 
     outgoing_messages();
 
     pthread_mutex_destroy(&connected_lock);
     pthread_mutex_destroy(&print_lock);
-    terminate_chat();
+    shutdown_chat();
 
     return 0;
 }
@@ -47,8 +56,8 @@ int main(int argc, char *argv[]){
 void initialize_chat(){
 
     initscr();
-    //raw();
     noraw();
+    //raw();
     //cbreak();
     //nocbreak(); 
     keypad(stdscr, TRUE);
@@ -61,6 +70,13 @@ void initialize_chat(){
 
     //Show prompt message
     mvwprintw(stdscr, LINES-1, 0, "Send> ");
+
+    //Get maximum input length
+    if((COLS - 11) < (MESSAGE_LENGTH - 3)){
+        input_length = COLS - 11;
+    }else{
+        input_length = MESSAGE_LENGTH - 3;        
+    }
 
     //Refresh windows so they appear on screen
     wrefresh(chat_win);
@@ -79,28 +95,11 @@ void initialize_connection(char *ip, int port){
         wprintw(chat_win, "            -The chat client will close shortly-\n");
         wrefresh(chat_win);
         sleep(10);
-        terminate_chat();
+        shutdown_chat();
     }
 
     connected = true;
     print_to_chat(response, bytes_recv);
-}
-
-void terminate_chat(){
-
-    if(tid){
-        pthread_kill(tid, SIGUSR1); //Send signal for thread to exit
-        pthread_join(tid, NULL); //Wait for thread to exit
-    }
-
-    endwin();
-    exit(0);
-}
-
-/* TEMPORARY FIX - HANDLE CLOSING OF THREAD BETTER WHEN CALLED FROM WIHIN THAT THREAD */
-void terminate_chat_now(){
-    endwin();
-    exit(0);
 }
 
 void *incoming_messages(){
@@ -127,15 +126,8 @@ void *incoming_messages(){
             connected = false;
             pthread_mutex_unlock(&connected_lock);
             sleep(10);
-            terminate_chat_now();  
+            shutdown_chat();  
         }
-
-        /* //DEBUG PRINT
-        static int k = 0;
-        //wprintw(chat_win, "\nRECV %d", k);
-        k++;
-        wrefresh(chat_win); 
-        */
 
         print_to_chat(server_message, bytes_recv);
     }
@@ -150,11 +142,11 @@ void outgoing_messages(){
     do{
         
         //Get input string from the user
-        getnstr(user_message, COLS - 5);
+        getnstr(user_message, input_length);
 
         //Move cursor to starting position and clear the line
         pthread_mutex_lock(&print_lock);
-        wmove(stdscr, LINES-1, 6);
+        wmove(stdscr, LINES - 1, 6);
         clrtoeol();
         wrefresh(chat_win);
         wrefresh(stdscr);
@@ -165,9 +157,9 @@ void outgoing_messages(){
             continue;
         }else if(user_message[0] == '/'){
 
-            /* ---------------------- */
-            /* Process local commands */
-            /* ---------------------- */
+            /* --------------------- */
+            /* Process local command */
+            /* --------------------- */
 
             //Local command - Clear chat window
             if(strcmp(user_message, "/clear") == 0){
@@ -202,20 +194,23 @@ void outgoing_messages(){
                 continue;
             }
 
-            /* ------------------------------------------ */
-            /* Or fall through to send commands to server */
-            /* ------------------------------------------ */
+            /* ----------------------------------------- */
+            /* Or fall through to send command to server */
+            /* ----------------------------------------- */
         }
 
+        //%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         //Add a control character to the start of message so we know when it's
         //a new message since the message may be split up over multiple packets
         //message[0] = 0x02; //Start of text control character
+        //%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
         pthread_mutex_lock(&connected_lock);
         if(connected){
             pthread_mutex_unlock(&connected_lock);
 
             message_length = strlen(user_message);
+            status = send_message(user_message, message_length + 1);
             status = send_message(user_message, message_length + 1);
             if(status == -1){
                 perror("Error");
@@ -240,16 +235,16 @@ void print_to_chat(char * message, int bytes){
             pthread_mutex_lock(&print_lock);
             wprintw(chat_win, "\n");
             print_time(); 
-            wrefresh(chat_win);
-            wrefresh(stdscr);
+            wrefresh(chat_win); //Show timestamp on chat window
+            wrefresh(stdscr); //Ensure cursor in text window is show
             pthread_mutex_unlock(&print_lock);
             message++;
             bytes--;
         }
         pthread_mutex_lock(&print_lock);
         wprintw(chat_win, "%s", message);
-        wrefresh(chat_win);
-        wrefresh(stdscr);
+        wrefresh(chat_win); //Show message on chat window
+        wrefresh(stdscr); //Ensure cursor in text window is show
         pthread_mutex_unlock(&print_lock);
         length = strlen(message); 
         message += length + 1; //Move to next string - Add one to skip over the null character
@@ -259,9 +254,6 @@ void print_to_chat(char * message, int bytes){
             bytes -= length + 1; //Remaining bytes with a null character (the string is finished in this packet)
         }
     }
-
-    //wrefresh(chat_win); //Show message on chat window
-    //wrefresh(stdscr); //Ensures cursor in text window is show
 }
 
 void print_time(){
@@ -278,10 +270,11 @@ void print_time(){
     wrefresh(stdscr); 
 }
 
-static void handler(int sig_num){
-	pthread_exit(NULL);
+void shutdown_chat(){
+    endwin();
+    exit(0);
 }
 
-static void sig_handler(int sig_num){
-    terminate_chat_now();
+static void shutdown_handler(int sig_num){
+    shutdown_chat();
 }
