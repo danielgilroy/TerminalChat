@@ -12,8 +12,8 @@ pthread_mutex_t spam_lock;
 sqlite3 *user_db;
 /* ----------------- */
 
+pthread_t spam_tid;
 bool shutdown_server_flag = false;
-pthread_mutex_t shutdown_lock;
 unsigned int port_number = DEFAULT_PORT_NUMBER;
 
 int main(int argc, char* argv[]){
@@ -23,7 +23,6 @@ int main(int argc, char* argv[]){
         port_number = atoi(argv[1]);
     }
 
-    pthread_mutex_init(&shutdown_lock, NULL);
     pthread_mutex_init(&spam_lock, NULL);
     
     printf("**Opening Database**\n");
@@ -32,8 +31,6 @@ int main(int argc, char* argv[]){
     start_server();
 
     printf("**Shutting Down Server**\n");
-
-    pthread_mutex_destroy(&shutdown_lock);
     pthread_mutex_destroy(&spam_lock);
 
     return 0;
@@ -207,15 +204,17 @@ void start_server(){
         socket_fds[i].events = POLLIN;
     }
 
-    //Create thread for spam filter
-    pthread_t spam_tid;
+    //Create thread for spam timer
     pthread_create(&spam_tid, NULL, spam_timer, NULL);
+
+    //Detach spam timer thread
+    if(pthread_detach(spam_tid)){
+        perror("Thread detaching error");
+        exit(EXIT_FAILURE);
+    }
 
     //Call method for processing clients
     monitor_connections(server_socket);
-
-    //Wait for thread to finish
-    pthread_join(spam_tid, NULL);
 
     //Close the server socket
     status = close(server_socket);
@@ -255,14 +254,6 @@ void *spam_timer(){
             }
         }
         pthread_mutex_unlock(&spam_lock);
-
-        pthread_mutex_lock(&shutdown_lock);
-        if(shutdown_server_flag){
-            pthread_mutex_unlock(&shutdown_lock);
-            break;
-        }
-        pthread_mutex_unlock(&shutdown_lock);
-        
     }
 }
 
@@ -318,12 +309,9 @@ void monitor_connections(int server_socket){
 
 
         //Check if server has been flagged for shutdown
-        pthread_mutex_lock(&shutdown_lock);
         if(shutdown_server_flag){
-            pthread_mutex_unlock(&shutdown_lock);
             break;
         }
-        pthread_mutex_unlock(&shutdown_lock);
     }
 
     /* ---------------- */
@@ -537,9 +525,7 @@ void process_clients(char *client_msg, char *server_msg_prefixed, char **who_mes
 
                     }else if(strcmp(client_msg, "/die") == 0){
                         //Trigger server shutdown
-                        pthread_mutex_lock(&shutdown_lock);
                         shutdown_server_flag = die_cmd(user, server_msg_prefixed);
-                        pthread_mutex_unlock(&shutdown_lock);
                        
                     }else{
                         //Inform client of invalid command
