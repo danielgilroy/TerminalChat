@@ -27,11 +27,11 @@ void start_server();
 void *spam_timer();
 void monitor_connections(int);
 void accept_clients(int, char *, char **);
-void process_clients(char *, char *, char **);
+void process_clients(char *, char **);
 int check_for_spamming(table_entry_t *, char *);
 void private_message(table_entry_t *, int, char *, char *);
-void public_message(int, int, char *, char *);
-void remove_client(table_entry_t *, int, char *, char **);
+void public_message(table_entry_t *, int, char *);
+void remove_client(table_entry_t *, char *, char **);
 void shutdown_server(char *, char **);
 
 #endif

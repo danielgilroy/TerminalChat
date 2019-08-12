@@ -1,22 +1,36 @@
 #include "server_utils.h"
 
-char *prepare_client_message(char *client_message, int recv_status){
+// char *prepare_client_message2(char *client_message, int *recv_status){
 
-    //Replace ending \n with \0 or ending \r\n with \0\0
-    if(client_message[recv_status-1] == '\n'){
-        client_message[recv_status-1] = '\0';
-        if(recv_status > 1 && client_message[recv_status-2] == '\r'){
-            client_message[recv_status-2] = '\0';
-            recv_status--;
+//     //Replace ending \n with \0 or ending \r\n with \0\0
+//     if(client_message[*recv_status-1] == '\n'){
+//         client_message[*recv_status-1] = '\0';
+//         if(*recv_status > 1 && client_message[*recv_status-2] == '\r'){
+//             client_message[*recv_status-2] = '\0';
+//             (*recv_status)--;
+//         }
+//     }     
+    
+//     return client_message;
+// }
+
+int prepare_client_message(char *client_message, int recv_status){
+
+    //Replace ending \n with \0 or ending \r\n with \0\0 if they exist
+    for(size_t i = 0; i < recv_status; i++){
+        if(client_message[i] == '\0'){
+            return i + 1;
+        }else if(client_message[i] == '\n'){
+            client_message[i] = '\0';
+            return i + 1;
+        }else if(client_message[i] == '\r'){
+            client_message[i] = '\0';
+            client_message[i + 1] = '\0';
+            return i + 2;
         }
-    }     
-
-    //Null terminate message if it didn't have \n, \r\n, or \0 already
-    if(client_message[recv_status - 1] != '\0'){
-        client_message[recv_status] = '\0';
     }
     
-    return client_message;
+    return recv_status;
 }
 
 char *add_username_to_message(char *message, char *username, char *suffix){
@@ -43,7 +57,7 @@ int send_message(int socket, char *message, int message_length){
 
     int bytes_sent = 0;
 
-    while(message_length){
+    while(message_length > 0){
         bytes_sent = send(socket, message, message_length, 0);
         if(bytes_sent == -1){
             fprintf(stderr, "Error sending message to socket %d: %s\n", socket, strerror(errno));
@@ -87,6 +101,10 @@ void print_time(){
 
 void get_username_and_passwords(int cmd_length, char *client_message, char **new_name, char **password, char **password2){
     
+    if(new_name == NULL){
+        return;
+    }
+
     //Skip over command in client's message
     *new_name = client_message + cmd_length;
 
@@ -116,75 +134,75 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
     }
 }
 
-int is_password_valid(char *password, char *error_message){
+int is_password_invalid(char *password, char *error_message){
 
     //Check if password is too long
     if(!memchr(password, '\0', PASSWORD_LENGTH_MAX)){
         sprintf(error_message, "Server: Password is too long (max %d characters)", PASSWORD_LENGTH_MAX - 1);
-        return 0;
+        return 1;
     }
     //Check if password has any whitespace
     if(strpbrk(password, " \t\n\v\f\r")){
         sprintf(error_message, "Server: Passwords with spaces are restricted");
-        return 0;                            
+        return 1;                            
     }
     //Check if password is too short
     if(memchr(password, '\0', PASSWORD_LENGTH_MIN)){
         sprintf(error_message, "Server: Password is too short (min %d characters)", PASSWORD_LENGTH_MIN);
-        return 0; 
+        return 1; 
     }
 
-    return 1;
+    return 0;
 }
 
-int are_passwords_valid(char *password, char *password2, char *error_message){
+int are_passwords_invalid(char *password, char *password2, char *error_message){
 
     //Check if password is valid
-    if(!is_password_valid(password, error_message)){
-        return 0;
+    if(is_password_invalid(password, error_message)){
+        return 1;
     }
     //Check if password2 exists
     if(password2 == NULL){
         sprintf(error_message, "Server: The entered command requires the password be repeated");
-        return 0;
+        return 1;
     }
     //Check if password2 is valid
-    if(!is_password_valid(password2, error_message)){
-        return 0;
+    if(is_password_invalid(password2, error_message)){
+        return 1;
     }
     //Check is both passwords match
     if(strcmp(password, password2) != 0){
         sprintf(error_message, "Server: The two entered passwords do not match");
-        return 0;
+        return 1;
     }
     
-    return 1;
+    return 0;
 }
 
-int is_username_valid(char *username, char *error_message){
+int is_username_invalid(char *username, char *error_message){
 
     //Check if username exists
     if(username == NULL){
         sprintf(error_message, "Server: The entered command requires a username");
-        return 0;
+        return 1;
     }
     //Check if username is too long
-    if(!memchr(username, '\0', 16)){
+    if(!memchr(username, '\0', USERNAME_LENGTH)){
         sprintf(error_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-        return 0;
+        return 1;
     }                   
     //Check if username has any whitespace
     if(strpbrk(username, " \t\n\v\f\r")){
         sprintf(error_message, "Server: Usernames with spaces are restricted");
-        return 0;                            
+        return 1;                            
     }
     //Check if username is blank
     if(strcmp(username, "") == 0){
         sprintf(error_message, "Server: Blank usernames are restricted");
-        return 0;                              
+        return 1;                              
     }
 
-    return 1;
+    return 0;
 }
 
 int is_username_restricted(char *username, char *error_message){
@@ -194,14 +212,14 @@ int is_username_restricted(char *username, char *error_message){
 
     //Allow restricted usernames that are registered in database and password protected
     if(strcasecmp(username, "Admin") == 0){
-        return 1;
+        return 0;
     }
 
     //Check if username contains a restricted keyword
     for(int i = 0; i < sizeof(restricted_contains) / sizeof(restricted_contains[0]); i++){
         if(strncasecmp(username, restricted_contains[i], strlen(restricted_contains[i])) == 0){
             sprintf(error_message, "Server: Usernames containing \"%s\" are restricted", restricted_contains[i]);
-            return 0;  
+            return 1;  
         }
     }
 
@@ -209,11 +227,11 @@ int is_username_restricted(char *username, char *error_message){
     for(int i = 0; i < sizeof(restricted_exact) / sizeof(restricted_exact[0]); i++){
         if(strcasecmp(username, restricted_exact[i]) == 0){
             sprintf(error_message, "Server: Username \"%s\" is restricted", username);
-            return 0;  
+            return 1;  
         }
     }
 
-    return 1;
+    return 0;
 }
 
 void rebuild_who_message(char **who_messages, int room_id){
@@ -277,9 +295,9 @@ void rebuild_who_message(char **who_messages, int room_id){
     }
 }
 
-void remove_user(int room_id, table_entry_t *user){
+void remove_user(table_entry_t **user){
 
-    int i = user->index;
+    int i = (*user)->index;
     
     //Clear spam timeout and message count so new users using the same spot aren't affected
     pthread_mutex_lock(&spam_lock);
@@ -288,34 +306,37 @@ void remove_user(int room_id, table_entry_t *user){
     pthread_mutex_unlock(&spam_lock);
 
     //Close the client socket
-    check_status(close(user->socket_fd), "Error closing client socket");
+    check_status(close((*user)->socket_fd), "Error closing client socket");
 
     //Set FD to ignore state, decrement socket count, and set who_message for rebuild
     socket_fds[i].fd = -1;
     socket_count--;
 
     //Remove user from active_user hash table
-    delete_user(room_id, user);
+    delete_user(user);
 }
 
-void add_user(int room_id, char *username, size_t index, bool is_admin, int client_fd, char *ip, unsigned short port){
+table_entry_t * add_user(char *username, bool is_admin, int room_id, size_t index, int client_fd, char *ip, unsigned short port){
     
-    table_entry_t *s;
-    s = malloc(sizeof(table_entry_t));
-    if(s == NULL){
+    table_entry_t *new_user;
+    new_user = malloc(sizeof(table_entry_t));
+    if(new_user == NULL){
         perror("Error allocating hash table memory for new user");
         exit(EXIT_FAILURE);
     }
 
-    strncpy(s->id, username, USERNAME_LENGTH);
-    s->index = index;
-    s->is_admin = is_admin;
-    s->socket_fd = client_fd;
-    strncpy(s->ip, ip, INET_ADDRSTRLEN);
-    s->port = port;
+    strncpy(new_user->id, username, USERNAME_LENGTH);
+    new_user->is_admin = is_admin;
+    new_user->room_id = room_id;
+    new_user->index = index;
+    new_user->socket_fd = client_fd;
+    strncpy(new_user->ip, ip, INET_ADDRSTRLEN);
+    new_user->port = port;
 
-    HASH_ADD_STR(active_users[room_id], id, s);  //id: name of key field
+    HASH_ADD_STR(active_users[room_id], id, new_user);  //id: name of key field
     HASH_SRT(hh, active_users[room_id], id_compare); 
+
+    return new_user;
 }
 
 table_entry_t *get_user(int room_id, char *username){
@@ -324,14 +345,30 @@ table_entry_t *get_user(int room_id, char *username){
     return user;
 }
 
-void change_username(int room_id, table_entry_t *user, char *username){
-    add_user(room_id, username, user->index, user->is_admin, user->socket_fd, user->ip, user->port);
-    delete_user(room_id, user);
+table_entry_t *find_user(char *username){
+    table_entry_t *user = NULL;
+    for(int room_index = 0; room_index < MAX_ROOMS; room_index++){
+        HASH_FIND_STR(active_users[room_index], username, user);  //user: output pointer
+        if(user != NULL){
+            return user;
+        }
+    }
+    return NULL;
 }
 
-void delete_user(int room_id, table_entry_t *user) {
-    HASH_DEL(active_users[room_id], user);
-    free(user);
+table_entry_t * change_username(table_entry_t **user, char *username){
+    table_entry_t *tmp = NULL;
+    tmp = add_user(username, (*user)->is_admin, (*user)->room_id, (*user)->index, (*user)->socket_fd, (*user)->ip, (*user)->port);
+    delete_user(user);
+    *user = tmp;
+    return *user;
+}
+
+void delete_user(table_entry_t **user) {
+    int room_id = (*user)->room_id;
+    HASH_DEL(active_users[room_id], *user);
+    free(*user);
+    *user = NULL;
 }
 
 int id_compare(table_entry_t *a, table_entry_t *b){

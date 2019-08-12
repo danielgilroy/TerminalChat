@@ -1,16 +1,24 @@
 #include "server_commands.h"
 
-void whois_cmd(table_entry_t *user, char *client_msg){
+void whois_cmd(int cmd_length, table_entry_t *user, char *client_msg){
+
+    if(user == NULL){
+        return;
+    }
 
     char *username = user->id;
 
     //Setup "/whois" command with the client's own username
-    client_msg[6] = ' ';
-    client_msg[7] = '\0';
+    client_msg[cmd_length] = ' ';
+    client_msg[cmd_length + 1] = '\0';
     strncat(client_msg, username, MESSAGE_LENGTH);    
 }
 
-void whois_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client_msg, char *server_msg_prefixed){
+void whois_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *server_msg_prefixed){
+
+    if(user == NULL){
+        return;
+    }
 
     int client_socket = user->socket_fd;
     char *username = user->id;
@@ -21,7 +29,7 @@ void whois_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *clien
     get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
                             
     //Check if the username is valid
-    if(!is_username_valid(target_name, server_msg)){
+    if(is_username_invalid(target_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
@@ -38,7 +46,7 @@ void whois_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *clien
         }
 
         //Get user from active_users hash table
-        table_entry_t *target = get_user(room_id, target_name);
+        table_entry_t *target = find_user(target_name);
         if(target == NULL){
             //Username does not exist
             sprintf(server_msg, "Server: The user \"%s\" does not exist", target_name);
@@ -63,33 +71,33 @@ void who_cmd(int client_socket, char **who_messages){
     }
 }
 
-void who_arg_cmd(int client_socket, char *client_msg, char *server_msg_prefixed, char **who_messages){
+void who_arg_cmd(int cmd_length, int client_socket, char *client_msg, char *server_msg_prefixed, char **who_messages){
 
     char *server_msg = server_msg_prefixed + 1;
 
     //Check if argument after /who is valid
-    if(!isdigit(client_msg[5])){
+    if(!isdigit(client_msg[cmd_length])){
         sprintf(server_msg, "Server: Enter a valid room number (1 to %d) after /who", MAX_ROOMS - 1);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;    
     }
     
     //Get room number from user
-    char *targeted_room = client_msg + 5;
-    int targeted_room_id = atoi(targeted_room);
+    char *target_room = client_msg + cmd_length;
+    int target_room_id = atoi(target_room);
     
     //Check if chat room is valid
-    if(targeted_room_id >= MAX_ROOMS || targeted_room_id < 0){
+    if(target_room_id >= MAX_ROOMS || target_room_id < 0){
         sprintf(server_msg, "Server: Specified room doesn't exist (valid rooms are 1 to %d)", MAX_ROOMS - 1);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
 
     //Rebuild who_messages strings if necessary
-    rebuild_who_message(who_messages, targeted_room_id);
+    rebuild_who_message(who_messages, target_room_id);
 
     //Send message containing current users in the specified room
-    send_message(client_socket, who_messages[targeted_room_id], strlen(who_messages[targeted_room_id]) + 1);
+    send_message(client_socket, who_messages[target_room_id], strlen(who_messages[target_room_id]) + 1);
 }
 
 void join_cmd(int client_socket, char *server_msg_prefixed){
@@ -98,21 +106,26 @@ void join_cmd(int client_socket, char *server_msg_prefixed){
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
 }
 
-void join_arg_cmd(table_entry_t *user, int room_id, char *client_msg, char *server_msg_prefixed, char **who_messages){
+void join_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *server_msg_prefixed, char **who_messages){
 
-    int client_socket = user->socket_fd;
-    char *username = user->id;
+    if(user == NULL || *user == NULL){
+        return;
+    }
+
+    int room_id = (*user)->room_id;
+    int client_socket = (*user)->socket_fd;
+    char *username = (*user)->id;
     char *server_msg = server_msg_prefixed + 1;
 
     //Check if argument after /join is valid
-    if(!isdigit(client_msg[6])){
+    if(!isdigit(client_msg[cmd_length])){
         sprintf(server_msg, "Server: Enter a valid room number (0 to %d) after /join", MAX_ROOMS - 1);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;    
     }
     
     //Get new room number from user
-    char *new_room = client_msg + 6;
+    char *new_room = client_msg + cmd_length;
     int new_room_id = atoi(new_room);
 
     //Check if chat room is valid
@@ -137,9 +150,11 @@ void join_arg_cmd(table_entry_t *user, int room_id, char *client_msg, char *serv
     send_message_to_all(new_room_id, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
     
     //Move user to the new chat room
-    add_user(new_room_id, username, user->index, user->is_admin, user->socket_fd, user->ip, user->port);
-    delete_user(room_id, user);
-
+    table_entry_t *tmp = NULL;
+    tmp = add_user(username, (*user)->is_admin, new_room_id, (*user)->index, (*user)->socket_fd, (*user)->ip, (*user)->port);
+    delete_user(user);
+    *user = tmp;
+    
     //Send message letting clients in old chat room know someone changed rooms
         sprintf(server_msg, "Server: User \"%s\" switched to chat room #%d", username, new_room_id);
         send_message_to_all(room_id, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
@@ -153,15 +168,22 @@ void join_arg_cmd(table_entry_t *user, int room_id, char *client_msg, char *serv
     who_messages[new_room_id][0] = '\0';
 }
 
-void nick_cmd(int client_socket, char *username, char *server_msg_prefixed){
+void nick_cmd(table_entry_t *user, char *server_msg_prefixed){
+    int client_socket = user->socket_fd;
+    char *username = user->id;
     char *server_msg = server_msg_prefixed + 1;
     sprintf(server_msg, "Server: Your username is \"%s\"", username);
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 }
 
-void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client_msg, char *server_msg_prefixed, char **who_messages){
+void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *server_msg_prefixed, char **who_messages){
 
-    int client_socket = user->socket_fd;
+    if(user == NULL || *user == NULL){
+        return;
+    }
+
+    int room_id = (*user)->room_id;
+    int client_socket = (*user)->socket_fd;
     char *server_msg = server_msg_prefixed + 1;
 
     int status;
@@ -175,13 +197,13 @@ void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client
     char *db_hashed_password = NULL;
     char hashed_password[crypto_pwhash_STRBYTES];
 
-    strncpy(old_name, user->id, USERNAME_LENGTH);
+    strncpy(old_name, (*user)->id, USERNAME_LENGTH);
 
     //Get username and one password from client's message
     get_username_and_passwords(cmd_length, client_msg, &new_name, &password, NULL);
                             
     //Check if the username is valid or restricted
-    if(!is_username_valid(new_name, server_msg) || !is_username_restricted(new_name, server_msg)){
+    if(is_username_invalid(new_name, server_msg) || is_username_restricted(new_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }       
@@ -217,7 +239,7 @@ void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client
         }
 
         //Check if password is valid
-        if(!is_password_valid(password, server_msg)){
+        if(is_password_invalid(password, server_msg)){
             send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
             
             //Clear the plain-text password from memory
@@ -282,14 +304,7 @@ void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client
     }
     
     //Check if username is already in use on the server
-    bool name_in_use = false;
-    for(int i = 0; i < MAX_ROOMS; i++){
-        if(get_user(i, new_name) != NULL){
-            name_in_use = true;
-            break;
-        }
-    }
-    if(name_in_use){
+    if(find_user(new_name)){
         sprintf(server_msg, "Server: The username \"%s\" is currently in use", new_name);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         
@@ -300,15 +315,15 @@ void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client
 
     //Check if database returned an admin user type
     if(user_type && strcmp(user_type, "admin") == 0){
-        user->is_admin = true;
+        (*user)->is_admin = true;
     }else{
-        user->is_admin = false; 
+        (*user)->is_admin = false; 
     }
     free(user_type);
     user_type = NULL;
 
     //Change username in active_users hash table
-    change_username(room_id, user, new_name);
+    change_username(user, new_name);
 
     //Set who_messages for rebuild
     who_messages[room_id][0] = '\0';
@@ -317,20 +332,24 @@ void nick_arg_cmd(table_entry_t *user, int room_id, int cmd_length, char *client
     printf("**%s on socket %d changed username to %s**\n", old_name, client_socket, new_name);
     
     //Send name change message to all clients if not in lobby
-    if(room_id != LOBBY_ROOM_ID){
-        sprintf(server_msg, "Server: %s changed their name to %s", old_name, new_name);
-        send_message_to_all(room_id, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-    }else{
+    if(room_id == LOBBY_ROOM_ID){
         sprintf(server_msg, "Server: Your username has been changed to \"%s\"", new_name);
-        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);  
+        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+    }else{
+        sprintf(server_msg, "Server: %s changed their name to %s", old_name, new_name);
+        send_message_to_all(room_id, server_msg_prefixed, strlen(server_msg_prefixed) + 1);  
     }
 
     //Clear the plain-text password from memory
     secure_zero(client_msg, MESSAGE_LENGTH);
 }
 
-void where_cmd(int client_socket, int room_id, char *server_msg_prefixed){
+void where_cmd(table_entry_t *user, char *server_msg_prefixed){
+    
+    int client_socket = user->socket_fd;
+    int room_id = user->room_id;
     char *server_msg = server_msg_prefixed + 1;
+
     if(room_id == 0){
         sprintf(server_msg, "Server: You are currently in the lobby");
     }else{
@@ -339,7 +358,7 @@ void where_cmd(int client_socket, int room_id, char *server_msg_prefixed){
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 }
 
-void where_arg_cmd(int client_socket, int cmd_length, char *client_msg, char *server_msg_prefixed){
+void where_arg_cmd(int cmd_length, int client_socket, char *client_msg, char *server_msg_prefixed){
 
     char *server_msg = server_msg_prefixed + 1;
     char *target_name = NULL;
@@ -347,26 +366,23 @@ void where_arg_cmd(int client_socket, int cmd_length, char *client_msg, char *se
     //Get username from client message
     get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
 
-    //Check if the username is valid
-    if(!is_username_valid(target_name, server_msg)){
+    //Check if the username is invalid
+    if(is_username_invalid(target_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }     
 
-    //Assume user is not on the server
-    sprintf(server_msg, "Server: \"%s\" is currently not on the server", target_name);
-
-    //Look for user in lobby and change the message if located
-    if(get_user(LOBBY_ROOM_ID, target_name) != NULL){
-        sprintf(server_msg, "Server: \"%s\" is currently in the lobby", target_name);
-    }else{
-        //Look for user in every chat room and change the message if located    
-        for(int i = 1; i < MAX_ROOMS; i++){
-            if(get_user(i, target_name) != NULL){
-                sprintf(server_msg, "Server: \"%s\" is currently in chat room #%d", target_name, i);
-                break;
-            }
+    //Look for target user and return their location
+    table_entry_t *target_user = find_user(target_name);
+    if(target_user){
+        int room_id = target_user->room_id;
+        if(room_id == LOBBY_ROOM_ID){
+            sprintf(server_msg, "Server: \"%s\" is currently in the lobby", target_name);
+        }else{
+            sprintf(server_msg, "Server: \"%s\" is currently in chat room #%d", target_name, room_id);
         }
+    }else{
+        sprintf(server_msg, "Server: \"%s\" is currently not on the server", target_name);
     }
 
     //Inform client about the specified user
@@ -379,8 +395,13 @@ void kick_cmd(int client_socket, char *server_msg_prefixed){
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
 }
 
-void kick_arg_cmd(table_entry_t *user, table_entry_t *tmp, int room_id, int cmd_length, char *client_msg, char *server_msg_prefixed, char **who_messages){
+void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char *client_msg, char *server_msg_prefixed, char **who_messages){
 
+    if(user == NULL || tmp == NULL){
+        return;
+    }
+
+    int room_id = user->room_id;
     int client_socket = user->socket_fd;
     char *username = user->id;
     char *server_msg = server_msg_prefixed + 1;
@@ -396,8 +417,8 @@ void kick_arg_cmd(table_entry_t *user, table_entry_t *tmp, int room_id, int cmd_
     //Get username from client's message
     get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
 
-    //Check if the username is valid
-    if(!is_username_valid(target_name, server_msg)){
+    //Check if the username is invalid
+    if(is_username_invalid(target_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
@@ -410,31 +431,27 @@ void kick_arg_cmd(table_entry_t *user, table_entry_t *tmp, int room_id, int cmd_
     }
 
     //Look for user and perform the kick if located
-    int target_room;
-    table_entry_t *targeted_user;
-    for(target_room = 0; target_room < MAX_ROOMS; target_room++){
-        if((targeted_user = get_user(target_room, target_name)) != NULL){
+    int target_room = 0;
+    table_entry_t *target_user = find_user(target_name);
+    if(target_user != NULL){
 
-            //Get tmp's hh.next for hash table itteration if removing tmp
-            if(tmp == targeted_user){
-                tmp = tmp->hh.next; //Avoids accessing removed user
-            }
+        target_room = target_user->room_id;
 
-            //Inform targeted_user that they have been kicked
-            sprintf(server_msg, "Server: You have been kicked from the server");
-            send_message(targeted_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-
-            //Remove client entry from server
-            remove_user(target_room, targeted_user);
-
-            //Set who_messages for rebuild
-            who_messages[target_room][0] = '\0';
-
-            break;
+        //Get tmp's hh.next for hash table itteration if removing tmp
+        if(*tmp == target_user){
+            *tmp = (*tmp)->hh.next; //Avoids accessing removed user
         }
-    }
 
-    if(targeted_user != NULL){
+        //Inform target_user that they have been kicked
+        sprintf(server_msg, "Server: You have been kicked from the server");
+        send_message(target_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+
+        //Remove client entry from server
+        remove_user(&target_user);
+
+        //Set who_messages for rebuild
+        who_messages[target_room][0] = '\0';
+
         //Print kick message to server's terminal
         printf("**%s in room #%d kicked from the server**\n", target_name, target_room);
 
@@ -459,7 +476,11 @@ void register_cmd(int client_socket, char *server_msg_prefixed){
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
 }
 
-void register_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *server_msg_prefixed){
+void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *server_msg_prefixed){
+
+    if(user == NULL){
+        return;
+    }
 
     int client_socket = user->socket_fd;
     char *username = user->id;
@@ -478,14 +499,14 @@ void register_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, cha
     //Get username and passwords from client's message
     get_username_and_passwords(cmd_length, client_msg, &new_name, &password, &password2);
 
-    //Check if the username is valid or restricted
-    if(!is_username_valid(new_name, server_msg) || !is_username_restricted(new_name, server_msg)){
+    //Check if the username is invalid or restricted
+    if(is_username_invalid(new_name, server_msg) || is_username_restricted(new_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }       
 
     //Check if passwords are valid
-    if(!are_passwords_valid(password, password2, server_msg)){
+    if(are_passwords_invalid(password, password2, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;  
     }
@@ -565,8 +586,12 @@ void admin_cmd(int client_socket, char *server_msg_prefixed){
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 }
 
-void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *server_msg_prefixed){
+void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *server_msg_prefixed){
     
+    if(user == NULL){
+        return;
+    }
+
     int client_socket = user->socket_fd;
     char *username = user->id;
     char *server_msg = server_msg_prefixed + 1;
@@ -596,13 +621,13 @@ void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *
     //Get username from client's message
     get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
 
-    //Check if the username is valid
-    if(!is_username_valid(target_name, server_msg)){
+    //Check if the username is invalid
+    if(is_username_invalid(target_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }   
 
-    //Check if targeted user is the client
+    //Check if target user is the client
     if(strcmp(target_name, username) == 0){
         //Inform client that changing their own account is prohibited
         sprintf(server_msg, "Server: Chaning your own account type is prohibited");
@@ -610,7 +635,7 @@ void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *
         return;
     }
 
-    //Check if targeted user is the main admin account
+    //Check if target user is the main admin account
     if(strcmp(target_name, "Admin") == 0){
         //Inform client that changing the main admin account is prohibited
         sprintf(server_msg, "Server: Changing the main admin account type is prohibited");
@@ -641,7 +666,7 @@ void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *
         free(user_type);
         user_type = NULL;
 
-        //Switch targeted user's account type in database
+        //Switch target user's account type in database
         query = "UPDATE users SET type = ?1 WHERE id = ?2;";
         sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
         sqlite3_bind_text(stmt, 1, type_change, -1, SQLITE_STATIC);
@@ -654,18 +679,15 @@ void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *
         sqlite3_finalize(stmt);
 
         //Look for user on server and change account type if located
-        table_entry_t *target_user = NULL;
-        for(int i = 0; i < MAX_ROOMS; i++){
-            if((target_user = get_user(i, target_name)) != NULL){
+        table_entry_t *target_user = find_user(target_name);
+        if(target_user != NULL){
 
-                //Switch account type
-                target_user->is_admin = !target_user->is_admin;
+            //Switch account type
+            target_user->is_admin = !target_user->is_admin;
 
-                //Inform targeted user of account type change
-                sprintf(server_msg, "Server: Your account has changed to \"%s\" type", type_change);
-                send_message(target_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-                break;
-            }
+            //Inform target user of account type change
+            sprintf(server_msg, "Server: Your account has changed to \"%s\" type", type_change);
+            send_message(target_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         }
 
         //Print account type change message to server's terminal
@@ -676,13 +698,17 @@ void admin_arg_cmd(table_entry_t *user, int cmd_length, char *client_msg, char *
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 
     }else{
-        //Inform client that the targeted user is not registered
+        //Inform client that target user is not registered
         sprintf(server_msg, "Server: The username \"%s\" is not registered", target_name);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
     }
 }
 
 bool die_cmd(table_entry_t *user, char *server_msg_prefixed){
+
+    if(user == NULL){
+        return false;
+    }
 
     int client_socket = user->socket_fd;
     char *server_msg = server_msg_prefixed + 1;

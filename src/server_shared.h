@@ -33,8 +33,9 @@
 
 typedef struct {
     char id[USERNAME_LENGTH];  /* key */
-    size_t index;
     bool is_admin;
+    int room_id;
+    size_t index;
     int socket_fd;
     char ip[INET_ADDRSTRLEN];
     unsigned short port;
