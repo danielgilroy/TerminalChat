@@ -225,7 +225,6 @@ void start_server(){
     if(status != SQLITE_OK){
         fprintf(stderr, "Error closing database: %s\n", sqlite3_errmsg(user_db));
     }
-
 }
 
 void *spam_timer(){
@@ -260,7 +259,7 @@ void *spam_timer(){
 void monitor_connections(int server_socket){
 
     int status;
-    char server_msg_prefixed[MESSAGE_LENGTH];
+    char server_msg_prefixed[MESSAGE_LENGTH + 1];
     char *server_msg = server_msg_prefixed + 1;
     char *who_messages[MAX_ROOMS] = {NULL};
 
@@ -287,7 +286,7 @@ void monitor_connections(int server_socket){
 
         //Check if a poll error has occurred
         if(status == -1){
-            perror("Error");
+            perror("Poll Error");
             continue;
         }
     
@@ -393,7 +392,7 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
 void process_clients(char *server_msg_prefixed, char **who_messages){
 
     int recv_status = 0; 
-    size_t msg_length = 0;
+    size_t msg_size = 0;
     size_t index = 0;
     int client_socket = 0;
     char *server_msg = server_msg_prefixed + 1;
@@ -402,10 +401,11 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
     char client_msg[MESSAGE_LENGTH + 1];
     char packet_msg[MESSAGE_LENGTH + 1];
 
-    //Fail-safe to ensure NULL terminated client message
+    //Fail-safe to ensure NUL terminated client message
     client_msg[MESSAGE_LENGTH] = '\0';
     packet_msg[MESSAGE_LENGTH] = '\0';
     char *packet_ptr = NULL;
+    char *client_ptr = NULL;
 
     memset(message_recv, false, sizeof(message_recv));
 
@@ -429,8 +429,10 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
 
                 //Receive messages from client sockets with active events
                 recv_status = recv(client_socket, packet_msg, MESSAGE_LENGTH, 0);
-                if(recv_status == -1 && (errno != EWOULDBLOCK && errno != EAGAIN)){
-                    perror("Error receiving message from client socket");
+                if(recv_status == -1){
+                    if(errno != EWOULDBLOCK && errno != EAGAIN){
+                        perror("Error receiving message from client socket");
+                    }
                     continue;
                 }
 
@@ -441,19 +443,102 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                     remove_client(user, server_msg_prefixed, who_messages);
                     continue;
                 }
+
+
+                //----------------DEBUG----------------//
+                if(recv_status > strlen(packet_msg) + 1){
+                    fprintf(stderr, "\nNeed to handle multiple messages in a single packet");
+                }
+                printf("\nRAW: ");
+                for(int i = 0; i < recv_status; i++){
+                    printf("%d ", packet_msg[i]);
+                }
+                printf("\n");
+                //----------------DEBUG----------------//
+
                 
                 //Mark socket as messaged received
                 message_recv[index] = true;
 
                 //Point to first message in packet
                 packet_ptr = packet_msg;
+                client_ptr = client_msg;
+                int recv_status2 = 0;
+                bool has_ending_char = false;
 
                 while(recv_status > 0){
 
-                    //Copy packet message to client_msg and prepare it for processing
-                    strncpy(client_msg, packet_ptr, recv_status);
-                    msg_length = prepare_client_message(client_msg, recv_status);
+                    //Copy packet message to client message
+                    if(packet_ptr[0] == MESSAGE_START){
+                        packet_ptr++;
+                        recv_status--;
+                        strncpy(client_ptr, packet_ptr, recv_status);
+                        has_ending_char = true;
+                    }else{
+                        strncpy(client_ptr, packet_ptr, recv_status);
+                    }
+
+                    //Prepare client message for processing
+                    msg_size = prepare_client_message(client_msg, recv_status);
+                    printf("clistart: %s\n", client_msg);
+
+                    //If message ends in "0x03 \0", change to "\0 \0"
+                    if(client_msg[msg_size - 2] == MESSAGE_END){
+                        client_msg[msg_size - 2] = '\0';
+                    }else if(has_ending_char){ //Incomplete message 
+                        //Get remaining part of message from next packet
+                        int tries = 0;
+                        do{
+                            recv_status2 = recv(client_socket, packet_msg, MESSAGE_LENGTH - msg_size, 0);
+                            if(recv_status2 == -1){
+                                if(errno != EWOULDBLOCK && errno != EAGAIN){
+                                    perror("Error receiving message from client socket");
+                                }
+                            }else{
+                                break;
+                            }
+                            tries++;
+                        }while(tries < 10);
+
+                        if(recv_status2 > 0){
+                            recv_status += recv_status2;
+                        }else{
+                            perror("Error receiving a complete message from client");
+                            continue;
+                        }
+
+                        //----------------DEBUG----------------//
+                        printf("\nRAW 2: ");
+                        for(int i = 0; i < recv_status2; i++){
+                            printf("%d ", packet_msg[i]);
+                        }
+                        printf("\n");
+
+                        printf("cli: %s  pack: %s\n", client_msg + msg_size, packet_msg);
+                        //----------------DEBUG----------------//
+                        
+                        packet_ptr = packet_msg;
+                        client_ptr = client_ptr + msg_size;
+                        continue;
+                    }
                     
+
+                    //--------------DEBUG--------------//
+                    printf("Remaing: %d   msg size %ld ---------------\n", recv_status, msg_size);
+
+                    printf("\n");
+                    for(int i = 0; i < recv_status; i++){
+                        printf("%d ", packet_ptr[i]);
+                    }
+                    printf("\n");
+                    printf("\n");
+                    for(int i = 0; i < recv_status; i++){
+                        printf("%d ", client_msg[i]);
+                    }
+                    printf("\n");
+                    //--------------DEBUG--------------//
+
+
                     if(client_msg[0] == '\0'){
 
                         /* ----------------------------- */
@@ -564,7 +649,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         /* Send private message to targeted user */
                         /* ------------------------------------- */
                         if(client_msg[0] == '@'){
-                            private_message(user, msg_length, client_msg, server_msg_prefixed);
+                            private_message(user, msg_size, client_msg, server_msg_prefixed);
                             break;
                         }
 
@@ -578,14 +663,22 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         /* -------------------------------- */
                         /* Send public message to chat room */
                         /* -------------------------------- */            
-                        public_message(user, msg_length, client_msg);
+                        public_message(user, msg_size, client_msg);
+
+                        //------DEBUG------//
+                        printf("\n");
+                        for(int i = 0; i < msg_size; i++){
+                            printf("%d ", client_msg[i]);
+                        }
+                        printf("\n");
+                        //------DEBUG------//
                     }
 
                 //Adjust recv_status to remaining bytes not yet processed
-                recv_status -= msg_length;
+                recv_status -= msg_size;
 
                 //Point to next message in the packet
-                packet_ptr += msg_length;
+                packet_ptr += msg_size;
 
                 }
             }
@@ -635,7 +728,7 @@ void private_message(table_entry_t *user, int recv_status, char *client_msg, cha
 
     //Copy targeted username from client's message
     strncpy(target_username, client_msg + 1, target_username_length);
-    target_username[target_username_length] = '\0'; //Null terminate username
+    target_username[target_username_length] = '\0'; //NUL terminate username
     target_username[0] = toupper(target_username[0]); //Capitalize username
 
     //Look for user in all chat rooms

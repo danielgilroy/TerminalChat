@@ -24,8 +24,9 @@
 #define PASSWORD_LENGTH_MIN 4
 #define PASSWORD_LENGTH_MAX 16
 
-#define MESSAGE_LENGTH 256
+#define MESSAGE_LENGTH 16
 #define MESSAGE_START 0x02 //Start of Text control character
+#define MESSAGE_END 0x03 //End of text control character
 #define WHO_MESSAGE_LENGTH 32 //NOTE: Array will be reallocated if needed
 
 #define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_INTERACTIVE //Use crypto_pwhash_OPSLIMIT_MODERATE for higher security

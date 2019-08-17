@@ -37,7 +37,7 @@ char *add_username_to_message(char *message, char *username, char *suffix){
 //NOTE: Calling function must call free on the allocated memory
 
     size_t length = 1 + USERNAME_LENGTH + strlen(suffix) + MESSAGE_LENGTH + 1;
-    char *message_result = malloc(length);
+    char *message_result = calloc(length, sizeof(char));
     if(message_result == NULL){
         fprintf(stderr, "Error allocating memory");
         exit(EXIT_FAILURE);
