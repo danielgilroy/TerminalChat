@@ -14,7 +14,7 @@
 
 #define DEFAULT_PORT_NUMBER 9852
 #define DEFAULT_IP_ADDRESS "127.0.0.1"
-#define MESSAGE_LENGTH 16
+#define MESSAGE_LENGTH 256 //Must be less than or equal to server's message length
 #define MESSAGE_START 0x02 //Start of Text control character
 #define MESSAGE_END 0x03 //End of text control character
 
@@ -22,6 +22,6 @@ int join_server(char *, unsigned int, char *);
 int receive_message(char *, int);
 int send_message(char *, int);
 int close_socket(int);
-void check_status(int);
+int check_status(int status, char *error);
 
 #endif

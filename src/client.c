@@ -15,8 +15,8 @@ int main(int argc, char *argv[]){
     unsigned int port = DEFAULT_PORT_NUMBER;
 
     //Setup signal handlers to properly clost ncurses
-    signal(SIGINT, shutdown_handler); //CTRL+C
-    signal(SIGQUIT, shutdown_handler); //CTRL+BACKSLASH
+    signal(SIGINT, shutdown_handler); //CTRL + C
+    signal(SIGQUIT, shutdown_handler); //CTRL + BACKSLASH
     signal(SIGSEGV, shutdown_handler); //Memory access violation
 
     //Get user-specified IP and port from CLI arguments
@@ -33,7 +33,6 @@ int main(int argc, char *argv[]){
         }
     }
 
-    //Initialize ncurses chat windows and connect to server
     initialize_chat();
     initialize_connection(ip, port);
 
@@ -59,7 +58,6 @@ int main(int argc, char *argv[]){
         exit(EXIT_FAILURE);
     }
 
-    //Process outgoing messages
     outgoing_messages();
 
     pthread_mutex_destroy(&connected_lock);
@@ -72,13 +70,10 @@ int main(int argc, char *argv[]){
 void initialize_chat(){
 
     initscr();
-    noecho();
-    cbreak();
-    //nocbreak();
-    //raw(); 
-    ////noraw();
-    keypad(text_win, TRUE);
-
+    check_status(noecho(), "Error setting noecho state for ncurses");
+    check_status(cbreak(), "Error setting cbreak state for ncurses");
+    
+    //Create new windows for chat text and text entry
     chat_win = newwin(LINES - 1, COLS, 0, 0);
     text_win = newwin(1, COLS, LINES - 1, 0);
 
@@ -86,13 +81,9 @@ void initialize_chat(){
     idlok(chat_win, TRUE);
     scrollok(chat_win, TRUE);
 
-    //Disable scrolling for text-entry window
-    // idlok(text_win, FALSE);
-    // scrollok(text_win, FALSE);
-
-    idlok(text_win, FALSE);
+    //Disable scrolling for text-entry window and enable keypad
     scrollok(text_win, FALSE);
-    keypad(text_win, TRUE);
+    check_status(keypad(text_win, TRUE), "Error enabling keypad for text window");
 
     //Show prompt message
     mvwprintw(text_win, 0, 0, INPUT_INDICATOR);
@@ -110,6 +101,7 @@ void initialize_chat(){
 }
 
 void initialize_connection(char *ip, int port){
+
     int bytes_recv;
     char response[MESSAGE_LENGTH];
 
@@ -162,7 +154,6 @@ void *incoming_messages(){
 void outgoing_messages(){
 
     int status = 0;
-    int cmd_length = 0;
     size_t message_size = 0;
     char user_message[MESSAGE_LENGTH];
     user_message[0] = '\0';
@@ -178,7 +169,6 @@ void outgoing_messages(){
         pthread_mutex_lock(&print_lock);
         mvwprintw(text_win, 0, 0, INPUT_INDICATOR);
         wclrtoeol(text_win);
-        //wrefresh(chat_win);
         wrefresh(text_win);
         pthread_mutex_unlock(&print_lock);
 
@@ -187,71 +177,21 @@ void outgoing_messages(){
             /* --------------------- */
             /* Process local command */
             /* --------------------- */
+            local_commands(user_message, message_size);
 
-            //Local command - Clear chat window
-            if(strcmp(user_message, "/clear") == 0){
-                werase(chat_win);
-                wrefresh(chat_win);
-                wrefresh(text_win);
-                continue;
-            }
-
-            //Local Command - Change colours
-            if(strncmp(user_message, "/colour", 7) == 0){
-                //Convert british spelling "colour" to "color"
-                for(int i = 5; i < message_size; i++){
-                    user_message[i] = user_message[i+1];
-                }
-            }
-            if(strncmp(user_message, "/color", cmd_length = 6) == 0){
-
-                static int color = 0;
-                start_color();
-                init_pair(0, COLOR_WHITE, COLOR_BLACK);
-                init_pair(1, COLOR_YELLOW, COLOR_BLUE);
-                
-                if(user_message[cmd_length] == '\0'){
-                    color = (color + 1) % 2;
-                    wbkgd(chat_win, COLOR_PAIR(color));
-                }else if(strncmp(user_message + cmd_length + 1, "off", 4) == 0){
-                    wbkgd(chat_win, COLOR_PAIR(0));
-                    color = 0;
-                }else if(strncmp(user_message + cmd_length + 1, "on", 3) == 0){
-                    wbkgd(chat_win, COLOR_PAIR(1));
-                    color = 1;
-                }else{
-                    continue;
-                }
-
-                wrefresh(chat_win);
-                wrefresh(text_win);
-                continue;
-            }
-
-            /* ----------------------------------------- */
-            /* Or fall through to send command to server */
-            /* ----------------------------------------- */
+            //Or fall through to send command to server
         }
+
+        /* --------------------------- */
+        /* Send user message to server */
+        /* --------------------------- */
 
         pthread_mutex_lock(&connected_lock);
         if(connected){
             pthread_mutex_unlock(&connected_lock);
 
-            status = send_message(user_message, message_size + 1); //Plus 1 for NUL character
-            //---------DEBUG---------//
-            // char flip[MESSAGE_LENGTH];
-            // char tmp;
-            // for(int i = 0, j = message_size - 1; i <= j; i++, j--){
-            //     tmp = user_message[i];
-            //     user_message[i] = user_message[j];
-            //     user_message[j] = tmp;
-            // }
-            // status = send_message(user_message, message_size + 1);
-            // status = send_message(user_message, message_size + 1);
-            //---------DEBUG---------//
-            if(status == -1){
-                perror("Error");
-            }
+            status = send_message(user_message, message_size);
+            check_status(status, "Error sending message to server");
         }
         pthread_mutex_unlock(&connected_lock);
 
@@ -277,53 +217,43 @@ bool get_user_message(char *message, size_t *message_size){
     int end = 0; //End position
     while((c = wgetch(text_win)) != '\n'){       
 
-        //---DEBUG PRINT---//
-        // mvwprintw(chat_win, 0, 0, "%d", c);
-        // wrefresh(chat_win);
-        //---DEBUG PRINT---//
-
-        if(c == KEY_LEFT){
-            //Move cursor left
+        if(c == KEY_LEFT){ //Move cursor left
             if(pos > 0){
                 pos--;  
                 pthread_mutex_lock(&print_lock);
                 wmove(text_win, 0, INPUT_START + pos);
-                //wrefresh(chat_win);
-                //wrefresh(text_win);
+                wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);
             }
-        }else if(c == KEY_RIGHT){
-            //Move cursor right
+        }else if(c == KEY_RIGHT){ //Move cursor right
             if(pos < end){
                 pos++;
                 pthread_mutex_lock(&print_lock);      
                 wmove(text_win, 0, INPUT_START + pos);
-                //wrefresh(chat_win);
-                //wrefresh(text_win);
+                wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);
             }
-        }else if(c == KEY_UP){
-            //Get previous sent message
+        }else if(c == KEY_UP){ //Insert previous sent message into buffer
             end = *message_size;
+            pos = end;
             pthread_mutex_lock(&print_lock);
             for(int i = 0; i < end; i++){
                 buffer[i] = message[i];
                 mvwprintw(text_win, 0, INPUT_START + i, "%c", message[i]);
             }
-            pos = end;
             wmove(text_win, 0, INPUT_START + pos);
             wclrtoeol(text_win);
+            wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
-        }else if(c == KEY_DOWN){
-            //Clear current buffer
+        }else if(c == KEY_DOWN){ //Clear the current buffer
+            end = 0;
+            pos = 0;
             pthread_mutex_lock(&print_lock);
             mvwprintw(text_win, 0, 0, INPUT_INDICATOR);
             wclrtoeol(text_win);
+            wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
-            end = 0;
-            pos = 0;
-        }else if(c == KEY_BACKSPACE){
-            //Erase character to left of cursor
+        }else if(c == KEY_BACKSPACE){ //Erase character to left of cursor
             if(pos > 0){
                 //Shift remaining characters to the left
                 pthread_mutex_lock(&print_lock);
@@ -340,12 +270,10 @@ bool get_user_message(char *message, size_t *message_size){
                 pthread_mutex_lock(&print_lock);
                 mvwprintw(text_win, 0, INPUT_START + end, " ");
                 wmove(text_win, 0, INPUT_START + pos);
-                //wrefresh(chat_win);
-                //wrefresh(text_win);
+                wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);    
             }
-        }else if(c == KEY_DC){
-            //Erase character to right of cursor
+        }else if(c == KEY_DC){ //Erase character to right of cursor
             if(pos < end){
                 //Shift remaining characters to the left
                 pthread_mutex_lock(&print_lock);
@@ -361,11 +289,10 @@ bool get_user_message(char *message, size_t *message_size){
                 pthread_mutex_lock(&print_lock);
                 mvwprintw(text_win, 0, INPUT_START + end, " ");
                 wmove(text_win, 0, INPUT_START + pos);
-                //wrefresh(chat_win);
-                //wrefresh(text_win);
+                wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock); 
             }
-        }else if(end < input_length && (c >= 32 && c <= 127)){
+        }else if(end < input_length && (c >= 32 && c <= 127)){ //Write character to buffer
             //Shift remaining characters to the right
             pthread_mutex_lock(&print_lock);
             for(int i = end; i > pos; i--){
@@ -375,19 +302,15 @@ bool get_user_message(char *message, size_t *message_size){
             pthread_mutex_unlock(&print_lock);
 
             //Insert new character at the cursor position
-            buffer[pos] = c;
             pthread_mutex_lock(&print_lock);
             wmove(text_win, 0, INPUT_START + pos);
             wprintw(text_win, "%c", c);
-            //wrefresh(chat_win);
-            //wrefresh(text_win);
+            wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
+            buffer[pos] = c;
             pos++;
             end++;
         }
-
-        wrefresh(chat_win);
-        wrefresh(text_win);
     }
 
     //NUL terminate user message and set message_size
@@ -398,7 +321,62 @@ bool get_user_message(char *message, size_t *message_size){
         return true;
     } 
 
+    //Return false on empty buffer
     return false;
+}
+
+void local_commands(char *user_message, size_t message_size){
+
+    int cmd_length = 0;
+
+    //Clear chat window
+    if(strcmp(user_message, "/clear") == 0){
+        werase(chat_win);
+        wrefresh(chat_win);
+        wrefresh(text_win);
+        return;
+    }
+
+    //Change window colours
+    if(strncmp(user_message, "/colour", 7) == 0){
+        //Convert british spelling "colour" to "color"
+        for(int i = 5; i < message_size; i++){
+            user_message[i] = user_message[i+1];
+        }
+    }
+    if(strncmp(user_message, "/color", cmd_length = 6) == 0){
+
+        if(!has_colors()){
+            return;
+        }
+
+        use_default_colors();
+        start_color();
+        init_pair(0, -1, -1); //Default colours
+        init_pair(1, COLOR_WHITE, COLOR_BLUE);
+        init_pair(2, COLOR_WHITE, COLOR_BLACK);
+        static int color = 0;
+        
+        if(user_message[cmd_length] == '\0'){
+            color = (color + 1) % 2;
+            wbkgd(chat_win, COLOR_PAIR(color)); //Colour pair 0 or 1
+            wbkgd(text_win, COLOR_PAIR(color * 2)); //Colour pair 0 or 2
+        }else if(strncmp(user_message + cmd_length + 1, "off", 4) == 0){
+            wbkgd(chat_win, COLOR_PAIR(0));
+            wbkgd(text_win, COLOR_PAIR(0));
+            color = 0;
+        }else if(strncmp(user_message + cmd_length + 1, "on", 3) == 0){
+            wbkgd(chat_win, COLOR_PAIR(1));
+            wbkgd(text_win, COLOR_PAIR(2));
+            color = 1;
+        }else{
+            return;
+        }
+
+        wrefresh(chat_win);
+        wrefresh(text_win);
+        return;
+    }
 }
 
 void print_to_chat(char * message, int bytes){
@@ -410,17 +388,16 @@ void print_to_chat(char * message, int bytes){
 
         c = message[pos];
 
+        pthread_mutex_lock(&print_lock);
         if(c == MESSAGE_START){
-            pthread_mutex_lock(&print_lock);
             wprintw(chat_win, "\n");
             print_time(); //Print timestamp to chat window
         }else{
-            pthread_mutex_lock(&print_lock);
             wprintw(chat_win, "%c", c);
         }
 
         wrefresh(chat_win); 
-        wrefresh(text_win); //Ensure cursor in in text window
+        wrefresh(text_win); //Ensure cursor is in text window
         pthread_mutex_unlock(&print_lock);
         message++;
         bytes--; 
@@ -442,7 +419,7 @@ void print_time(){
 }
 
 void shutdown_chat(){
-    endwin();
+    check_status(endwin(), "Error closing ncurses");
     exit(0);
 }
 

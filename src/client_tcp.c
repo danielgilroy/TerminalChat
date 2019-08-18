@@ -18,13 +18,14 @@ int join_server(char *ip, unsigned int port, char *response){
 
     //Create Socket
     network_socket = socket(PF_INET, SOCK_STREAM, 0);
-    check_status(network_socket);
+    check_status(network_socket, "Error creating network socket");
 
     //Perform the connection using the socket and address struct
     status = connect(network_socket, (struct sockaddr *) &server_address, sizeof(server_address));
     
-    //Check for error with the connection
+    //Check for connection errors
     if(status){
+        check_status(status, "Error connecting to server");
         close_socket(network_socket);
         strcpy(response, "        -Error connecting to the chat server-");
         return status;
@@ -32,7 +33,7 @@ int join_server(char *ip, unsigned int port, char *response){
 
     //Recieve welcome message from the server
     status = recv(network_socket, response, MESSAGE_LENGTH, 0);
-    check_status(status);
+    check_status(status, "Error recieving welcome message from server");
 
     return status;
 }
@@ -40,37 +41,34 @@ int join_server(char *ip, unsigned int port, char *response){
 int receive_message(char *message, int message_length){
 
     int recv_status;
-
     recv_status = recv(network_socket, message, message_length, 0);
 
     if(recv_status <= 0) {
         close_socket(network_socket);
     }
-    
+
     return recv_status;
 }
 
 int send_message(char *client_message, int client_message_size){
 
-    int bytes_sent;
+    int bytes_sent = 0;
     int message_size = client_message_size + 2; //Add 2 for start and end characters
     char message[message_size]; 
     char *message_ptr = message;
 
-    //Add a control character to the start and end of the message so the server knows when it's
-    //received a complete message since the message may be split up over multiple packets
-    message[0] = MESSAGE_START;
-    strncpy(message + 1, client_message, client_message_size);
-    message[message_size - 2] = MESSAGE_END;
-    message[message_size - 1] = '\0';
-
-    if(!strcmp(message, "/exit\n") || !strcmp(message, "/quit")){
-        bytes_sent = close_socket(network_socket);
-        check_status(bytes_sent);
+    if(!strcmp(client_message, "/q") || !strcmp(client_message, "/quit") || !strcmp(client_message, "/exit\n")){
+        close_socket(network_socket);
     }else{
+
+        //Add a control character to the start and end of the message so the server knows when it's
+        //received a complete message since the message may be split up over multiple packets
+        message[0] = MESSAGE_START;
+        strncpy(message + 1, client_message, client_message_size);
+        message[message_size - 1] = MESSAGE_END;
+
         do{
             bytes_sent = send(network_socket, message_ptr, message_size, 0);
-            check_status(bytes_sent);
             if(bytes_sent < 0){
                 break;
             }
@@ -83,16 +81,14 @@ int send_message(char *client_message, int client_message_size){
 }
 
 int close_socket(int socket){
-
-    //Close the socket
     int status = close(socket);
-    check_status(status);
-
+    check_status(status, "Error closing network socket");
     return status;
 }
 
-void check_status(int status){
+int check_status(int status, char *error){
     if(status == -1){
-        fprintf(stderr, "Error: %s\n", strerror(errno));
+        perror(error);
     }
+    return status;
 }
