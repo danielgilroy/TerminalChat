@@ -20,26 +20,32 @@
 
 #define MAX_ROOMS 11
 #define LOBBY_ROOM_ID 0
-#define USERNAME_LENGTH 16
-#define PASSWORD_LENGTH_MIN 4
-#define PASSWORD_LENGTH_MAX 16
 
-#define MESSAGE_LENGTH 16
-#define MESSAGE_START 0x02 //Start of Text control character
-#define MESSAGE_END 0x03 //End of text control character
-#define WHO_MESSAGE_LENGTH 32 //NOTE: Array will be reallocated if needed
+#define USERNAME_SIZE 16
+#define PASSWORD_SIZE_MIN 4
+#define PASSWORD_SIZE_MAX 16
+
+#define MESSAGE_SIZE 256
+#define WHO_MESSAGE_SIZE 32 //NOTE: Array will be reallocated if needed
+
+#define MESSAGE_END 0x03 //End-of-Text control character
+#define MESSAGE_START 0x02 //Start-of-Text control character
+#define MESSAGE_START_STR "\x02" //Start-of-Text control character as a string
+#define SERVER_PREFIX "Server: " //Message prefix for server messages
 
 #define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_INTERACTIVE //Use crypto_pwhash_OPSLIMIT_MODERATE for higher security
 #define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_INTERACTIVE //Use crypto_pwhash_MEMLIMIT_MODERATE for higher security
 
 typedef struct {
-    char id[USERNAME_LENGTH];  /* key */
+    char id[USERNAME_SIZE];  /* key */
     bool is_admin;
     int room_id;
     size_t index;
     int socket_fd;
     char ip[INET_ADDRSTRLEN];
     unsigned short port;
+    char *message;
+    size_t message_size;
     UT_hash_handle hh;         /* makes this structure hashable */
 } table_entry_t;
 

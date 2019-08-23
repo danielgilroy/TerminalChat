@@ -1,24 +1,10 @@
 #include "server_utils.h"
 
-// char *prepare_client_message2(char *client_message, int *recv_status){
-
-//     //Replace ending \n with \0 or ending \r\n with \0\0
-//     if(client_message[*recv_status-1] == '\n'){
-//         client_message[*recv_status-1] = '\0';
-//         if(*recv_status > 1 && client_message[*recv_status-2] == '\r'){
-//             client_message[*recv_status-2] = '\0';
-//             (*recv_status)--;
-//         }
-//     }     
-    
-//     return client_message;
-// }
-
-int prepare_client_message(char *client_message, int recv_status){
+size_t prepare_client_message(char *client_message, ssize_t recv_status){
 
     //Replace ending \n with \0 or ending \r\n with \0\0 if they exist
-    for(size_t i = 0; i < recv_status; i++){
-        if(client_message[i] == '\0'){
+    for(size_t i = 0; i < MESSAGE_SIZE; i++){
+        if(client_message[i] == MESSAGE_END || client_message[i] == '\0'){
             return i + 1;
         }else if(client_message[i] == '\n'){
             client_message[i] = '\0';
@@ -30,13 +16,15 @@ int prepare_client_message(char *client_message, int recv_status){
         }
     }
     
-    return recv_status;
+    //Nul terminate end of message if no ending characters were found 
+    client_message[recv_status] = '\0';
+    return (size_t) (recv_status + 1);
 }
 
-char *add_username_to_message(char *message, char *username, char *suffix){
+char *add_username_to_message(const char *message, const char *username, const char *suffix){
 //NOTE: Calling function must call free on the allocated memory
 
-    size_t length = 1 + USERNAME_LENGTH + strlen(suffix) + MESSAGE_LENGTH + 1;
+    size_t length = 1 + USERNAME_SIZE + strlen(suffix) + MESSAGE_SIZE + 1;
     char *message_result = calloc(length, sizeof(char));
     if(message_result == NULL){
         fprintf(stderr, "Error allocating memory");
@@ -53,31 +41,49 @@ char *add_username_to_message(char *message, char *username, char *suffix){
     return message_result;
 }
 
-int send_message(int socket, char *message, int message_length){
+ssize_t send_message(int socket, const char *message, size_t message_length){
 
-    int bytes_sent = 0;
+    ssize_t bytes_sent = 0;
+    int tries = 24;
 
     while(message_length > 0){
+
         bytes_sent = send(socket, message, message_length, 0);
+
         if(bytes_sent == -1){
-            fprintf(stderr, "Error sending message to socket %d: %s\n", socket, strerror(errno));
-            return bytes_sent;
+            if(bytes_sent == EWOULDBLOCK || bytes_sent == EAGAIN){
+                //Wait for send buffer to have available space
+                //This essentially replicates a blocking send so a time out is added 
+                if(tries){
+                    struct timespec wait_time = {0, 125000000L}; //0.125 seconds
+                    nanosleep(&wait_time, NULL);
+                    tries--;
+                }else{
+                    //Number of tries exceeded: 24 tries * 0.125 seconds = 3 seconds total wait
+                    fprintf(stderr, "Sending message to socket %d has timed out\n", socket);
+                    return bytes_sent;
+                }      
+            }else{
+                fprintf(stderr, "Error sending message to socket %d: %s\n", socket, strerror(errno));
+                return bytes_sent;
+            }
+        }else{
+            message += bytes_sent; //Point to the remaining portion that was not sent
+            message_length -= bytes_sent; //Calculate the remaining bytes to be sent
         }
-        message += bytes_sent; //Point to the remaining portion that was not sent
-        message_length -= bytes_sent; //Calculate the remaining bytes to be sent
     }
 
     return bytes_sent;
 }
 
-int send_message_to_all(int room_id, char *message, int message_length){
+ssize_t send_message_to_all(int room_id, const char *message, size_t message_length){
 
     //Prevent messages from being sent to everyone in the lobby room
     if(room_id == LOBBY_ROOM_ID){
         return -1;
     }
 
-    int status = 0;
+    ssize_t status = 0;
     table_entry_t *s;
 
     for(s = active_users[room_id]; s != NULL; s = s->hh.next) {
@@ -85,18 +91,6 @@ int send_message_to_all(int room_id, char *message, int message_length){
     }                                                            
 
     return status;
-}
-
-void print_time(){
-    time_t raw_time = time(NULL);
-    struct tm *cur_time;
-
-    //Get local time
-    time(&raw_time);
-    cur_time = localtime(&raw_time);  
-
-    //Print time to terminal
-    printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
 }
 
 void get_username_and_passwords(int cmd_length, char *client_message, char **new_name, char **password, char **password2){
@@ -114,7 +108,7 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
     if(password == NULL){return;} //Calling function doesn't want password
 
     //Check if the user entered a password
-    *password = memchr(*new_name, ' ', USERNAME_LENGTH);
+    *password = memchr(*new_name, ' ', USERNAME_SIZE);
     if(*password != NULL){
 
         //Null terminate username and get pointer to password
@@ -124,119 +118,154 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
         if(password2 == NULL){return;} //Calling function doesn't want a second password
 
         //Check if the user entered a second password
-        *password2 = memchr(*password, ' ', USERNAME_LENGTH);
+        *password2 = memchr(*password, ' ', PASSWORD_SIZE_MAX);
         if(*password2 != NULL){
 
             //Null terminate previous password and get pointer to next password
             (*password2)[0] = '\0';
             (*password2)++;
         }
+    }else{
+        if(password2 != NULL){ //Caller wants a second password but first password failed
+            *password2 = NULL; //Ensure password2 doesn't point to garbage values
+        }
     }
 }
 
-int is_password_invalid(char *password, char *error_message){
+int get_admin_password(char *admin_password){
 
-    //Check if password is too long
-    if(!memchr(password, '\0', PASSWORD_LENGTH_MAX)){
-        sprintf(error_message, "Server: Password is too long (max %d characters)", PASSWORD_LENGTH_MAX - 1);
-        return 1;
+    int c = 0;
+    int pos = 0;
+
+    while((c = getchar()) != '\n'){
+        // if(pos > 0 && (c == 0x08 || c == 0x7F)){
+        //     printf("\x7F");
+        //     pos--;
+        // }else 
+        if(pos < PASSWORD_SIZE_MAX - 1 && c >= 32 && c < 127){
+            admin_password[pos] = c;
+            pos++;
+            printf("*");
+        }
     }
-    //Check if password has any whitespace
+    admin_password[pos] = '\0';
+    
+    return pos + 1;
+}
+
+bool is_password_invalid(const char *password, char *error_message){
+
+    if(password == NULL){
+        sprintf(error_message, SERVER_PREFIX "The command requires a password");
+        return true;
+    }
+
+    //Check if too short
+    if(memchr(password, '\0', PASSWORD_SIZE_MIN)){
+        sprintf(error_message, SERVER_PREFIX "Password is too short (min %d characters)", PASSWORD_SIZE_MIN);
+        return true; 
+    }
+    //Check if too long
+    if(!memchr(password, '\0', PASSWORD_SIZE_MAX)){
+        sprintf(error_message, SERVER_PREFIX "Password is too long (max %d characters)", PASSWORD_SIZE_MAX - 1);
+        return true;
+    }
+    //Check if any whitespace
     if(strpbrk(password, " \t\n\v\f\r")){
-        sprintf(error_message, "Server: Passwords with spaces are restricted");
-        return 1;                            
-    }
-    //Check if password is too short
-    if(memchr(password, '\0', PASSWORD_LENGTH_MIN)){
-        sprintf(error_message, "Server: Password is too short (min %d characters)", PASSWORD_LENGTH_MIN);
-        return 1; 
+        sprintf(error_message, SERVER_PREFIX "Passwords with spaces are restricted");
+        return true;                            
     }
 
-    return 0;
+    return false;
 }
 
-int are_passwords_invalid(char *password, char *password2, char *error_message){
+bool are_passwords_invalid(const char *password1, const char *password2, char *error_message){
 
-    //Check if password is valid
-    if(is_password_invalid(password, error_message)){
-        return 1;
+    //Check if password1 exists
+    if(password1 == NULL){
+        sprintf(error_message, SERVER_PREFIX "The command requires a password be entered twice");
+        return true;
+    }
+    //Check if password1 is invalid
+    if(is_password_invalid(password1, error_message)){
+        return true;
     }
     //Check if password2 exists
     if(password2 == NULL){
-        sprintf(error_message, "Server: The entered command requires the password be repeated");
-        return 1;
+        sprintf(error_message, SERVER_PREFIX "The command requires the password be repeated");
+        return true;
     }
-    //Check if password2 is valid
+    //Check if password2 is invalid
     if(is_password_invalid(password2, error_message)){
-        return 1;
+        return true;
     }
     //Check is both passwords match
-    if(strcmp(password, password2) != 0){
-        sprintf(error_message, "Server: The two entered passwords do not match");
-        return 1;
+    if(strcmp(password1, password2) != 0){
+        sprintf(error_message, SERVER_PREFIX "The two entered passwords do not match");
+        return true;
     }
     
-    return 0;
+    return false;
 }
 
-int is_username_invalid(char *username, char *error_message){
+bool is_username_invalid(const char *username, char *error_message){
 
     //Check if username exists
     if(username == NULL){
-        sprintf(error_message, "Server: The entered command requires a username");
-        return 1;
+        sprintf(error_message, SERVER_PREFIX "The command requires a username");
+        return true;
     }
-    //Check if username is too long
-    if(!memchr(username, '\0', USERNAME_LENGTH)){
-        sprintf(error_message, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
-        return 1;
-    }                   
-    //Check if username has any whitespace
-    if(strpbrk(username, " \t\n\v\f\r")){
-        sprintf(error_message, "Server: Usernames with spaces are restricted");
-        return 1;                            
-    }
-    //Check if username is blank
+    //Check if blank
     if(strcmp(username, "") == 0){
-        sprintf(error_message, "Server: Blank usernames are restricted");
-        return 1;                              
+        sprintf(error_message, SERVER_PREFIX "Usernames cannot be blank");
+        return true;                              
+    }
+    //Check if too long
+    if(!memchr(username, '\0', USERNAME_SIZE)){
+        sprintf(error_message, SERVER_PREFIX "Username is too long (max %d characters)", USERNAME_SIZE - 1);
+        return true;
+    }                   
+    //Check if any whitespace
+    if(strpbrk(username, " \t\n\v\f\r")){
+        sprintf(error_message, SERVER_PREFIX "Usernames cannot have spaces");
+        return true;                            
     }
 
-    return 0;
+    return false;
 }
 
-int is_username_restricted(char *username, char *error_message){
+bool is_username_restricted(const char *username, char *error_message){
     
     char *restricted_contains[] = {"Admin", "Server", "Client", "Administrator", "Moderator"};
     char *restricted_exact[] = {"Empty"};
 
     //Allow restricted usernames that are registered in database and password protected
     if(strcasecmp(username, "Admin") == 0){
-        return 0;
+        return false;
     }
 
     //Check if username contains a restricted keyword
     for(int i = 0; i < sizeof(restricted_contains) / sizeof(restricted_contains[0]); i++){
         if(strncasecmp(username, restricted_contains[i], strlen(restricted_contains[i])) == 0){
-            sprintf(error_message, "Server: Usernames containing \"%s\" are restricted", restricted_contains[i]);
-            return 1;  
+            sprintf(error_message, SERVER_PREFIX "Usernames containing \"%s\" are restricted", restricted_contains[i]);
+            return true;  
         }
     }
 
     //Check if username is a restricted keyword
     for(int i = 0; i < sizeof(restricted_exact) / sizeof(restricted_exact[0]); i++){
         if(strcasecmp(username, restricted_exact[i]) == 0){
-            sprintf(error_message, "Server: Username \"%s\" is restricted", username);
-            return 1;  
+            sprintf(error_message, SERVER_PREFIX "Username \"%s\" is restricted", username);
+            return true;  
         }
     }
 
-    return 0;
+    return false;
 }
 
 void rebuild_who_message(char **who_messages, int room_id){
 
-    size_t who_message_length;
+    size_t who_message_size;
     static size_t allocated_lengths[MAX_ROOMS];
 
     if(who_messages == NULL){
@@ -246,12 +275,12 @@ void rebuild_who_message(char **who_messages, int room_id){
 
     //Perform initial allocation of memory if needed
     if(who_messages[room_id] == NULL){
-        who_messages[room_id] = malloc(WHO_MESSAGE_LENGTH * sizeof(**who_messages));
+        who_messages[room_id] = malloc(WHO_MESSAGE_SIZE * sizeof(**who_messages));
         if(who_messages[room_id] == NULL){
             fprintf(stderr, "Error allocating memory for room #%d who_message\n", room_id);
-            exit(0);
+            exit(EXIT_FAILURE);
         }
-        allocated_lengths[room_id] = WHO_MESSAGE_LENGTH;
+        allocated_lengths[room_id] = WHO_MESSAGE_SIZE;
         who_messages[room_id][0] = '\0'; //Set who_message to rebuild state
     }
 
@@ -265,31 +294,28 @@ void rebuild_who_message(char **who_messages, int room_id){
         //Check if chat room has users
         int room_user_count = HASH_COUNT(active_users[room_id]);
         if(room_user_count == 0){
-            strncat(who_messages[room_id], "Empty", WHO_MESSAGE_LENGTH);
+            strncat(who_messages[room_id], "Empty", WHO_MESSAGE_SIZE);
         }else{
 
             //Get who_message string length - Add extra 1 for null character
-            who_message_length = strlen(who_messages[room_id]) + (room_user_count * USERNAME_LENGTH) + 1;
+            who_message_size = strlen(who_messages[room_id]) + (room_user_count * USERNAME_SIZE) + 1;
 
             //Allocate memory for the string if it's longer than initial allocated size
-            if(who_message_length > allocated_lengths[room_id]){
-                /* DEBUG STATEMENT */
-                //printf("realloc room #%d to %lu\n", room_id, who_message_length);
-                /* --------------- */
-                char *new_ptr = realloc(who_messages[room_id], who_message_length * sizeof(**who_messages));
+            if(who_message_size > allocated_lengths[room_id]){
+                char *new_ptr = realloc(who_messages[room_id], who_message_size * sizeof(**who_messages));
                 if(new_ptr == NULL){
                     fprintf(stderr, "Error allocating memory for who_message\n");
                     exit(0);
                 }
                 who_messages[room_id] = new_ptr;
-                allocated_lengths[room_id] = who_message_length;
+                allocated_lengths[room_id] = who_message_size;
             } 
 
             //Itterate through the hash table and append usernames
             table_entry_t *user;
             for(user = active_users[room_id]; user != NULL; user = user->hh.next) {
-                strncat(who_messages[room_id], user->id, who_message_length);
-                strncat(who_messages[room_id], " ", who_message_length);
+                strncat(who_messages[room_id], user->id, who_message_size);
+                strncat(who_messages[room_id], " ", who_message_size);
             }
         }
     }
@@ -316,7 +342,7 @@ void remove_user(table_entry_t **user){
     delete_user(user);
 }
 
-table_entry_t * add_user(char *username, bool is_admin, int room_id, size_t index, int client_fd, char *ip, unsigned short port){
+table_entry_t * add_user(const char *username, bool is_admin, int room_id, size_t index, int client_fd, char *ip, unsigned short port){
     
     table_entry_t *new_user;
     new_user = malloc(sizeof(table_entry_t));
@@ -325,13 +351,15 @@ table_entry_t * add_user(char *username, bool is_admin, int room_id, size_t inde
         exit(EXIT_FAILURE);
     }
 
-    strncpy(new_user->id, username, USERNAME_LENGTH);
+    strncpy(new_user->id, username, USERNAME_SIZE);
     new_user->is_admin = is_admin;
     new_user->room_id = room_id;
     new_user->index = index;
     new_user->socket_fd = client_fd;
     strncpy(new_user->ip, ip, INET_ADDRSTRLEN);
     new_user->port = port;
+    new_user->message = NULL;
+    new_user->message_size = 1; //Set to 1 for empty string size "\0"
 
     HASH_ADD_STR(active_users[room_id], id, new_user);  //id: name of key field
     HASH_SRT(hh, active_users[room_id], id_compare); 
@@ -345,7 +373,7 @@ table_entry_t *get_user(int room_id, char *username){
     return user;
 }
 
-table_entry_t *find_user(char *username){
+table_entry_t *find_user(const char *username){
     table_entry_t *user = NULL;
     for(int room_index = 0; room_index < MAX_ROOMS; room_index++){
         HASH_FIND_STR(active_users[room_index], username, user);  //user: output pointer
@@ -373,6 +401,18 @@ void delete_user(table_entry_t **user) {
 
 int id_compare(table_entry_t *a, table_entry_t *b){
     return (strcasecmp(a->id, b->id));
+}
+
+void print_time(){
+    time_t raw_time = time(NULL);
+    struct tm *cur_time;
+
+    //Get local time
+    time(&raw_time);
+    cur_time = localtime(&raw_time);  
+
+    //Print time to terminal
+    printf("%02d:%02d ", cur_time->tm_hour, cur_time->tm_min);  
 }
 
 int check_status(int status, char *error){

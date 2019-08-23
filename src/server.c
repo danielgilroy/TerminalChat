@@ -1,4 +1,5 @@
 #include "server.h"
+#include <termios.h>
 
 /* Extern Definitions */
 int socket_count = 0;
@@ -12,16 +13,24 @@ pthread_mutex_t spam_lock;
 sqlite3 *user_db;
 /* ----------------- */
 
+pthread_attr_t spam_tattr;
 pthread_t spam_tid;
 bool shutdown_server_flag = false;
 unsigned int port_number = DEFAULT_PORT_NUMBER;
 
 int main(int argc, char* argv[]){
-    
+
     //Get port number from argument
     if(argc > 1){
         port_number = atoi(argv[1]);
     }
+
+    //Turn off input echoing
+    struct termios oldtc, newtc;
+    tcgetattr(STDIN_FILENO, &oldtc);
+    newtc = oldtc;
+    newtc.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newtc);
 
     pthread_mutex_init(&spam_lock, NULL);
     
@@ -75,15 +84,16 @@ void open_database(){
 
 void create_admin(){
 
-    char admin_password[MESSAGE_LENGTH];
-    char admin_password2[MESSAGE_LENGTH];
+    char admin_password[MESSAGE_SIZE];
+    char admin_password2[MESSAGE_SIZE];
     char hashed_password[crypto_pwhash_STRBYTES];
-    char password_error[MESSAGE_LENGTH];
+    char password_error[MESSAGE_SIZE];
     char *matching_error = "";
-    char *newline = NULL;
 
     const char *query;
     sqlite3_stmt *stmt;
+
+
 
     printf("**Creating Admin Account**\n");
 
@@ -100,25 +110,23 @@ void create_admin(){
 
         do{
             if(*password_error){ //Print error message if not blank
-                printf("%s\n\n", password_error + 8); //Add 8 to skip over "Server: " prefix
+                printf("%s\n\n", password_error + strlen(SERVER_PREFIX)); //Skip over SERVER_PREFIX
             }
+
             printf("Enter password for account \"Admin\": ");
-            fgets(admin_password, MESSAGE_LENGTH, stdin);
-            if((newline = strchr(admin_password, '\n')) != NULL){
-                *newline = '\0'; //Remove newline from user input
-            }
+            get_admin_password(admin_password);
+            printf("\n");
+
         }while(is_password_invalid(admin_password, password_error));
 
         printf("Retype the same password: ");
-        fgets(admin_password2, MESSAGE_LENGTH, stdin);
-        if((newline = strchr(admin_password2, '\n')) != NULL){
-            *newline = '\0'; //Remove newline from user input
-        }
+        get_admin_password(admin_password2);
+        printf("\n");
 
         //Set matching_error message for next loop itteration
         matching_error = "The entered passwords do not match";
-
-    }while(strcmp(admin_password, admin_password2) != 0);
+        
+    }while(strncmp(admin_password, admin_password2, PASSWORD_SIZE_MAX) != 0);
 
     //Hash password with libsodium
     if (crypto_pwhash_str(hashed_password, admin_password, strlen(admin_password), 
@@ -129,8 +137,8 @@ void create_admin(){
     }
 
     //Clear the plain-text passwords from memory
-    secure_zero(admin_password, PASSWORD_LENGTH_MAX);
-    secure_zero(admin_password2, PASSWORD_LENGTH_MAX);
+    secure_zero(admin_password, PASSWORD_SIZE_MAX);
+    secure_zero(admin_password2, PASSWORD_SIZE_MAX);
 
     //Register admin account into database with specified password
     query = "INSERT INTO users(id, password, type) VALUES('Admin', ?1, 'admin');";
@@ -203,13 +211,22 @@ void start_server(){
         socket_fds[i].fd = -1;
         socket_fds[i].events = POLLIN;
     }
-
-    //Create thread for spam timer
-    pthread_create(&spam_tid, NULL, spam_timer, NULL);
-
-    //Detach spam timer thread
-    if(pthread_detach(spam_tid)){
-        perror("Thread detaching error");
+    
+    //Create thread for spam timer in a detached state
+    if(pthread_attr_init(&spam_tattr)){
+        perror("Error initializing pthread attribute");
+        exit(EXIT_FAILURE);
+    }
+    if(pthread_attr_setdetachstate(&spam_tattr, PTHREAD_CREATE_DETACHED)){
+        perror("Error setting pthread detach state");
+        exit(EXIT_FAILURE);
+    }
+    if(pthread_create(&spam_tid, &spam_tattr, spam_timer, NULL)){
+        perror("Error creating pthread");
+        exit(EXIT_FAILURE);
+    }
+    if(pthread_attr_destroy(&spam_tattr)){
+        perror("Error destroying pthread attribute");
         exit(EXIT_FAILURE);
     }
 
@@ -217,8 +234,7 @@ void start_server(){
     monitor_connections(server_socket);
 
     //Close the server socket
-    status = close(server_socket);
-    check_status(status, "Error closing server socket");
+    check_status(close(server_socket), "Error closing server socket");
 
     //Close database of registered users
     status = sqlite3_close(user_db);
@@ -259,7 +275,7 @@ void *spam_timer(){
 void monitor_connections(int server_socket){
 
     int status;
-    char server_msg_prefixed[MESSAGE_LENGTH + 1];
+    char server_msg_prefixed[MESSAGE_SIZE + 1];
     char *server_msg = server_msg_prefixed + 1;
     char *who_messages[MAX_ROOMS] = {NULL};
 
@@ -277,12 +293,7 @@ void monitor_connections(int server_socket){
     while(1){
         
         //Monitor FDs for any activated events
-        status = poll(socket_fds, MAX_SOCKETS, POLL_TIMEOUT);
-        
-        //Check if a timeout has occurred:
-        if(status == 0){
-            continue; //Clients don't have any events or errors
-        }
+        status = poll(socket_fds, MAX_SOCKETS, -1);
 
         //Check if a poll error has occurred
         if(status == -1){
@@ -291,28 +302,27 @@ void monitor_connections(int server_socket){
         }
     
         /* ------------------------------------------ */
-        /* An event has occurred: Check server socket */
+        /* Event has occurred: Check server socket */
         /* ------------------------------------------ */
         if(socket_fds[0].revents & POLLIN){
             accept_clients(server_socket, server_msg_prefixed, who_messages);
         }
-
+        
         /* ----------------------------------------------------------------- */
-        /* An event has occurred: Check all active clients in every chat room */
+        /* Event has occurred: Check all active clients in every chat room */
         /* ----------------------------------------------------------------- */
         process_clients(server_msg_prefixed, who_messages);
-
 
         //Check if server has been flagged for shutdown
         if(shutdown_server_flag){
             break;
         }
     }
-
-    /* ---------------- */
-    /* Shut down server */
-    /* ---------------- */
-    shutdown_server(server_msg_prefixed, who_messages);
+    
+    /* --------------- */
+    /* Shutdown server */
+    /* --------------- */
+    shutdown_server(who_messages);
 }
 
 void accept_clients(int server_socket, char *server_msg_prefixed, char **who_messages){
@@ -320,8 +330,9 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
     int status, flags;
     int client_socket;
     static size_t index = 0;
-    char username[USERNAME_LENGTH];
+    char username[USERNAME_SIZE];
     char *server_msg = server_msg_prefixed + 1;
+    const char *server_msg_literal = NULL;
 
     struct sockaddr_in client_addr;
     socklen_t client_addr_size = sizeof(client_addr);
@@ -333,15 +344,21 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
         //Check for any pending connections
         client_socket = accept(server_socket, (struct sockaddr *) &client_addr, &client_addr_size);
 
-        //Accept all pending connections until the queue is empty
+        //Accept all pending connections until queue is empty or an error occurs
         if(client_socket == -1){
+            if(errno != EWOULDBLOCK && errno != EAGAIN){
+                perror("Error accepting new client");
+            }else{
+                //No more pending connections
+            }
+
             return;
         }
 
         //Check if server is full
         if(socket_count >= MAX_SOCKETS){
             printf("**Server has reached the maximum of %d clients**\n", MAX_SOCKETS - 1);
-            sprintf(server_msg, "Server: The server has reached the maximum of %d clients", MAX_SOCKETS - 1);
+            sprintf(server_msg, SERVER_PREFIX "The server has reached the maximum of %d clients", MAX_SOCKETS - 1);
             send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
             status = close(client_socket);
             check_status(status, "Error closing client socket");
@@ -353,7 +370,7 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
         who_messages[LOBBY_ROOM_ID][0] = '\0';
         
         //Set client socket to nonblocking
-        flags = fcntl(client_socket, F_GETFL);
+        flags = fcntl(client_socket, F_GETFL, NULL);
         check_status(flags, "Error getting flags for client socket");
         status = fcntl(client_socket, F_SETFL, flags | O_NONBLOCK);
         check_status(status, "Error setting client socket to nonblocking");
@@ -377,12 +394,12 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
         add_user(username, false, LOBBY_ROOM_ID, index, client_socket, ip_str, port);
 
         //Send server welcome messages to client
-        sprintf(server_msg, "Server: Welcome to the server - Default username is \"%s\"", username);
+        sprintf(server_msg, SERVER_PREFIX "Welcome to the server - Default username is \"%s\"", username);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-        sprintf(server_msg, "Server: Use the /nick command to change your username");
-        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-        sprintf(server_msg, "Server: Use the /join command to join a chat room");
-        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1); 
+        server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Use the /nick command to change your username";
+        send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
+        server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Use the /join command to join a chat room";
+        send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1); 
         
         //Print client joining message to the server's terminal
         printf("**Client%lu on socket %d (%s:%hu) joined the server**\n", index, client_socket, ip_str, port);
@@ -391,21 +408,22 @@ void accept_clients(int server_socket, char *server_msg_prefixed, char **who_mes
 
 void process_clients(char *server_msg_prefixed, char **who_messages){
 
-    int recv_status = 0; 
+    ssize_t recv_status = 0; 
     size_t msg_size = 0;
     size_t index = 0;
     int client_socket = 0;
+    int cmd_length = 0;
+    bool expect_ending_char = false;
     char *server_msg = server_msg_prefixed + 1;
+    const char *server_msg_literal = NULL;
     static bool message_recv[MAX_SOCKETS];
-    int8_t cmd_length = 0;
-    char client_msg[MESSAGE_LENGTH + 1];
-    char packet_msg[MESSAGE_LENGTH + 1];
+    static char client_msg[MESSAGE_SIZE + 1];
+    static char packet_msg[MESSAGE_SIZE + 1];
 
     //Fail-safe to ensure NUL terminated client message
-    client_msg[MESSAGE_LENGTH] = '\0';
-    packet_msg[MESSAGE_LENGTH] = '\0';
-    char *packet_ptr = NULL;
-    char *client_ptr = NULL;
+    client_msg[MESSAGE_SIZE] = '\0';
+    packet_msg[MESSAGE_SIZE] = '\0';
+    char *packet_ptr = packet_msg;
 
     memset(message_recv, false, sizeof(message_recv));
 
@@ -428,132 +446,96 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
             if(socket_fds[index].revents & POLLIN){                
 
                 //Receive messages from client sockets with active events
-                recv_status = recv(client_socket, packet_msg, MESSAGE_LENGTH, 0);
+                recv_status = recv(client_socket, packet_msg, MESSAGE_SIZE, 0);
                 if(recv_status == -1){
                     if(errno != EWOULDBLOCK && errno != EAGAIN){
                         perror("Error receiving message from client socket");
                     }
                     continue;
                 }
-
-                /* -------------------------- */
-                /* Client has left the server */
-                /* -------------------------- */
+                
+                //Check if client has left the server
                 if(recv_status == 0){
                     remove_client(user, server_msg_prefixed, who_messages);
                     continue;
                 }
-
-
-                //----------------DEBUG----------------//
-                if(recv_status > strlen(packet_msg) + 1){
-                    fprintf(stderr, "\nNeed to handle multiple messages in a single packet");
-                }
-                printf("\nRAW: ");
-                for(int i = 0; i < recv_status; i++){
-                    printf("%d ", packet_msg[i]);
-                }
-                printf("\n");
-                //----------------DEBUG----------------//
-
-                
-                //Mark socket as messaged received
+               
+                //Mark socket as messaged received 
                 message_recv[index] = true;
 
-                //Point to first message in packet
+                //Point to first message in packet and reset flag
                 packet_ptr = packet_msg;
-                client_ptr = client_msg;
-                int recv_status2 = 0;
-                bool has_ending_char = false;
+                expect_ending_char = false;
 
                 while(recv_status > 0){
 
                     //Copy packet message to client message
                     if(packet_ptr[0] == MESSAGE_START){
+                        //Skip over message start control character
                         packet_ptr++;
                         recv_status--;
-                        strncpy(client_ptr, packet_ptr, recv_status);
-                        has_ending_char = true;
+                        //Copy the new message
+                        strncpy(client_msg, packet_ptr, recv_status);
+                        client_msg[recv_status] = '\0';
+                        expect_ending_char = true;
+                    }else if(user->message){
+                        //Copy the old incomplete message
+                        strncpy(client_msg, user->message, user->message_size);
+                        //Concatenate the new message
+                        strncat(client_msg, packet_ptr, recv_status);
+                        expect_ending_char = true;
                     }else{
-                        strncpy(client_ptr, packet_ptr, recv_status);
+                        //Handle message normally
+                        strncpy(client_msg, packet_ptr, recv_status);
+                        expect_ending_char = false;
                     }
 
                     //Prepare client message for processing
                     msg_size = prepare_client_message(client_msg, recv_status);
-                    printf("clistart: %s\n", client_msg);
 
-                    //If message ends in "0x03 \0", change to "\0 \0"
-                    if(client_msg[msg_size - 2] == MESSAGE_END){
-                        client_msg[msg_size - 2] = '\0';
-                    }else if(has_ending_char){ //Incomplete message 
-                        //Get remaining part of message from next packet
-                        int tries = 0;
-                        do{
-                            recv_status2 = recv(client_socket, packet_msg, MESSAGE_LENGTH - msg_size, 0);
-                            if(recv_status2 == -1){
-                                if(errno != EWOULDBLOCK && errno != EAGAIN){
-                                    perror("Error receiving message from client socket");
-                                }
-                            }else{
-                                break;
-                            }
-                            tries++;
-                        }while(tries < 10);
-
-                        if(recv_status2 > 0){
-                            recv_status += recv_status2;
-                        }else{
-                            perror("Error receiving a complete message from client");
-                            continue;
-                        }
-
-                        //----------------DEBUG----------------//
-                        printf("\nRAW 2: ");
-                        for(int i = 0; i < recv_status2; i++){
-                            printf("%d ", packet_msg[i]);
-                        }
-                        printf("\n");
-
-                        printf("cli: %s  pack: %s\n", client_msg + msg_size, packet_msg);
-                        //----------------DEBUG----------------//
+                    //Check if message is complete or incomplete
+                    if(client_msg[msg_size - 1] == MESSAGE_END){
+                        //Change MESSAGE_END ending to "\0" and process message
+                        client_msg[msg_size - 1] = '\0';
+                        expect_ending_char = false;
+                    }else if(expect_ending_char){ 
                         
-                        packet_ptr = packet_msg;
-                        client_ptr = client_ptr + msg_size;
+                        //Store incomplete message for later processing
+                        char *incomplete_msg = user->message;
+                        if(incomplete_msg == NULL){
+                            incomplete_msg = malloc(MESSAGE_SIZE * sizeof (*incomplete_msg));
+                            if(incomplete_msg == NULL){
+                                perror("Error allocating incomplete message for user");
+                                exit(EXIT_FAILURE);
+                            }
+                        }
+
+                        //Copy incomplete message to user's message buffer
+                        strncpy(incomplete_msg, client_msg, msg_size);
+                        user->message = incomplete_msg;
+                        user->message_size = msg_size;
+
+                        //Adjust recv_status to remaining bytes not yet processed
+                        recv_status -= (ssize_t) (msg_size);
+                        
+                        //Point to next message in the packet
+                        packet_ptr += (msg_size);
+
                         continue;
                     }
                     
-
-                    //--------------DEBUG--------------//
-                    printf("Remaing: %d   msg size %ld ---------------\n", recv_status, msg_size);
-
-                    printf("\n");
-                    for(int i = 0; i < recv_status; i++){
-                        printf("%d ", packet_ptr[i]);
-                    }
-                    printf("\n");
-                    printf("\n");
-                    for(int i = 0; i < recv_status; i++){
-                        printf("%d ", client_msg[i]);
-                    }
-                    printf("\n");
-                    //--------------DEBUG--------------//
-
-
                     if(client_msg[0] == '\0'){
-
                         /* ----------------------------- */
                         /* Ignore client's empty message */
                         /* ----------------------------- */
-
                     }else if(client_msg[0] == '/'){
-
                         /* ------------------------------- */
                         /* Process client's server command */
                         /* ------------------------------- */
 
                         if(strcmp(client_msg, "/whois") == 0){
-                            cmd_length = 6;
                             //Return the client's IP address and port
+                            cmd_length = 6;
                             whois_cmd(cmd_length, user, client_msg);
 
                         } //Fallthrough to targeted /whois command
@@ -572,7 +554,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
 
                         }else if(strcmp(client_msg, "/join") == 0){
                             //Inform client of /join usage
-                            join_cmd(client_socket, server_msg_prefixed);
+                            join_cmd(client_socket);
 
                         }else if(strncmp(client_msg, "/join ", cmd_length = 6) == 0){
                             //Join the user-specified chat room
@@ -585,6 +567,10 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         }else if(strncmp(client_msg, "/nick ", cmd_length = 6) == 0){
                             //Change the client's username
                             nick_arg_cmd(cmd_length, &user, client_msg, server_msg_prefixed, who_messages);
+                            //Clear passwords from every buffer
+                            secure_zero(packet_msg, msg_size);
+                            secure_zero(client_msg, msg_size);
+                            secure_zero(user->message, msg_size);
 
                         }else if(strcmp(client_msg, "/where") == 0){
                             //Return the chat room you are currently in
@@ -596,7 +582,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         
                         }else if(strcmp(client_msg, "/kick") == 0){
                             //Inform client of /kick usage
-                            kick_cmd(client_socket, server_msg_prefixed);
+                            kick_cmd(client_socket);
 
                         }else if(strncmp(client_msg, "/kick ", cmd_length = 6) == 0){
                             //Kick specified user from the server
@@ -604,32 +590,43 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
 
                         }else if(strcmp(client_msg, "/register") == 0){
                             //Inform client of /register usage
-                            register_cmd(client_socket, server_msg_prefixed);
+                            register_cmd(client_socket);
                             
                         }else if(strncmp(client_msg, "/register ", cmd_length = 10) == 0){
                             //Register username in user database
                             register_arg_cmd(cmd_length, user, client_msg, server_msg_prefixed);
+                            //Clear passwords from every buffer
+                            secure_zero(packet_msg, msg_size);
+                            secure_zero(client_msg, msg_size);
+                            secure_zero(user->message, msg_size);
 
                         }else if(strcmp(client_msg, "/admin") == 0){
                             //Inform client of /admin usage
-                            admin_cmd(client_socket, server_msg_prefixed);
+                            admin_cmd(client_socket);
 
                         }else if(strncmp(client_msg, "/admin ", cmd_length = 7) == 0){
                             //Change account type of targeted user
                             admin_arg_cmd(cmd_length, user, client_msg, server_msg_prefixed);
 
                         }else if(strcmp(client_msg, "/die") == 0){
-                            //Trigger server shutdown
-                            shutdown_server_flag = die_cmd(user, server_msg_prefixed);
+                            //Trigger server shutdown if admin
+                            if(die_cmd(user)){
+                                shutdown_server_flag = true;
+                                break;
+                            }
                         
                         }else{
+                            //Remove arguments after the command if they exist
+                            char *arguments = memchr(client_msg, ' ', msg_size);
+                            if(arguments != NULL){
+                                arguments[0] = '\0';
+                            }
                             //Inform client of invalid command
-                            sprintf(server_msg, "Server: \"%s\" is not a valid command", client_msg);
+                            sprintf(server_msg, SERVER_PREFIX "\"%s\" is not a valid command", client_msg);
                             send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
                         }
                         
                     }else{
-
                         /* --------------------- */
                         /* Send client's message */
                         /* --------------------- */
@@ -644,42 +641,36 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                             spam_message_count[index]++;
                             pthread_mutex_unlock(&spam_lock);
                         }
-
-                        /* ------------------------------------- */
-                        /* Send private message to targeted user */
-                        /* ------------------------------------- */
+                        
                         if(client_msg[0] == '@'){
-                            private_message(user, msg_size, client_msg, server_msg_prefixed);
-                            break;
+                            /* ------------------------------------- */
+                            /* Send private message to targeted user */
+                            /* ------------------------------------- */
+                            private_message(user, client_msg, msg_size, server_msg_prefixed);
+                        }else if(user->room_id == LOBBY_ROOM_ID){
+                            //Inform client they aren't in a chat room
+                            server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "You're not in a chat room - Use the /join command";
+                            send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
+                        }else{
+                            /* -------------------------------- */
+                            /* Send public message to chat room */
+                            /* -------------------------------- */            
+                            public_message(user, client_msg, msg_size);
                         }
-
-                        //Inform client they aren't in a chat room
-                        if(user->room_id == LOBBY_ROOM_ID){
-                            sprintf(server_msg, "Server: You're not in a chat room - Use the /join command");
-                            send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
-                            break;
-                        }
-
-                        /* -------------------------------- */
-                        /* Send public message to chat room */
-                        /* -------------------------------- */            
-                        public_message(user, msg_size, client_msg);
-
-                        //------DEBUG------//
-                        printf("\n");
-                        for(int i = 0; i < msg_size; i++){
-                            printf("%d ", client_msg[i]);
-                        }
-                        printf("\n");
-                        //------DEBUG------//
                     }
 
-                //Adjust recv_status to remaining bytes not yet processed
-                recv_status -= msg_size;
+                    //Adjust recv_status to remaining bytes not yet processed
+                    recv_status -= (ssize_t) (msg_size - (user->message_size - 1));
 
-                //Point to next message in the packet
-                packet_ptr += msg_size;
-
+                    //Point to next message in the packet
+                    packet_ptr += (msg_size - (user->message_size - 1));
+                                        
+                    //Reset user's message buffer
+                    if(user->message){
+                        free(user->message);
+                        user->message = NULL;
+                        user->message_size = 1; //Set to 1 for empty string size "\0"
+                    }
                 }
             }
         }
@@ -712,16 +703,16 @@ int check_for_spamming(table_entry_t *user, char *server_msg_prefixed){
     return 0;
 }
 
-void private_message(table_entry_t *user, int recv_status, char *client_msg, char *server_msg_prefixed){
+void private_message(table_entry_t *user, char *client_msg, size_t msg_size, char *server_msg_prefixed){
 
     int client_socket = user->socket_fd;
     char *server_msg = server_msg_prefixed + 1;
-    char target_username[USERNAME_LENGTH];
+    char target_username[USERNAME_SIZE];
     size_t target_username_length = strcspn(client_msg + 1, " ");
 
     //Check if targeted username is too long
-    if(target_username_length > USERNAME_LENGTH - 1){
-        sprintf(server_msg, "Server: Username is too long (max %d characters)", USERNAME_LENGTH - 1);
+    if(target_username_length > USERNAME_SIZE - 1){
+        sprintf(server_msg, SERVER_PREFIX "Username is too long (max %d characters)", USERNAME_SIZE - 1);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
@@ -736,18 +727,18 @@ void private_message(table_entry_t *user, int recv_status, char *client_msg, cha
 
     //Inform client if user was not found
     if(target_user == NULL){
-        sprintf(server_msg, "Server: The user \"%s\" does not exist", target_username);
+        sprintf(server_msg, SERVER_PREFIX "The user \"%s\" does not exist", target_username);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
 
     //Remove '@' character, username, and empty space from client's message
     char *message = client_msg + 1 + target_username_length + 1;
-    recv_status -= (1 + target_username_length + 1);
+    msg_size -= (1 + target_username_length + 1);
 
     //Check if message to user is blank
     if(message[0] == '\0' || message[-1] != ' '){
-        sprintf(server_msg, "Server: The message to \"%s\" was blank", target_username);
+        sprintf(server_msg, SERVER_PREFIX "The message to \"%s\" was blank", target_username);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
@@ -756,19 +747,19 @@ void private_message(table_entry_t *user, int recv_status, char *client_msg, cha
     char *postfix = ">> ";
     char *username = user->id;
     message = add_username_to_message(message, username, postfix);
-    size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for 0x02 (MESSAGE_START)
+    size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for MESSAGE_START
 
     //Send message to target user and sender
-    send_message(target_user->socket_fd, message, recv_status + additional_length);
+    send_message(target_user->socket_fd, message, msg_size + additional_length);
     if(target_user->socket_fd != client_socket){
-        send_message(client_socket, message, recv_status + additional_length);
+        send_message(client_socket, message, msg_size + additional_length);
     }
 
     free(message);
     message = NULL;
 }
 
-void public_message(table_entry_t *user, int recv_status, char *client_msg){
+void public_message(table_entry_t *user, char *client_msg, size_t msg_size){
 
     int room_id = user->room_id;
     char *username = user->id;
@@ -776,10 +767,10 @@ void public_message(table_entry_t *user, int recv_status, char *client_msg){
     //Add sender's username to message
     char *postfix = ": ";
     char *message = add_username_to_message(client_msg, username, postfix);      
-    size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for 0x02 (MESSAGE_START)       
+    size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for MESSAGE_START       
 
     //Send message to all clients
-    send_message_to_all(room_id, message, recv_status + additional_length);
+    send_message_to_all(room_id, message, msg_size + additional_length);
 
     //Print client's message to server console
     print_time();
@@ -800,7 +791,7 @@ void remove_client(table_entry_t *user, char *server_msg_prefixed, char **who_me
     printf("**%s in room #%d left the server**\n", username, room_id);
 
     //Print message to chat room
-    sprintf(server_msg, "Server: %s left the server", username);
+    sprintf(server_msg, SERVER_PREFIX "%s left the server", username);
     send_message_to_all(room_id, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 
     //Remove user entry from server and set who_messages for rebuild
@@ -808,20 +799,26 @@ void remove_client(table_entry_t *user, char *server_msg_prefixed, char **who_me
     who_messages[room_id][0] = '\0';
 }
 
-void shutdown_server(char *server_msg_prefixed, char **who_messages){
+void shutdown_server(char **who_messages){
 
-    int client_socket;
+    int client_socket = 0;
+    int message_size = 0;
     table_entry_t *user, *tmp;
-    char *server_msg = server_msg_prefixed + 1;
+    const char *server_msg_literal = NULL;
 
     //Create server-shutdown message
-    sprintf(server_msg, "Server: The server has been shutdown by an admin");
+    server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "The server has been shutdown by an admin";
+    message_size = strlen(server_msg_literal) + 1;
 
-    //Close client sockets and delete users in hash table
+    //Free user messages, close client sockets, and delete users from hash table
     for(int room_id = 0; room_id < MAX_ROOMS; room_id++){
         HASH_ITER(hh, active_users[room_id], user, tmp){ //Uthash deletion-safe itteration
+            if(user->message){
+                free(user->message);
+                user->message = NULL;
+            }
             client_socket = user->socket_fd;
-            send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+            send_message(client_socket, server_msg_literal, message_size);
             check_status(close(client_socket), "Error closing client socket");
             delete_user(&user);
         }
