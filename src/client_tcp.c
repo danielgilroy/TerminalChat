@@ -32,7 +32,7 @@ int join_server(char *ip, unsigned int port, char *response){
     }
 
     //Recieve welcome message from the server
-    status = recv(network_socket, response, MESSAGE_LENGTH, 0);
+    status = recv(network_socket, response, MESSAGE_SIZE, 0);
     check_status(status, "Error recieving welcome message from server");
 
     return status;
@@ -53,7 +53,7 @@ int receive_message(char *message, int message_length){
 int send_message(char *client_message, int client_message_size){
 
     int bytes_sent = 0;
-    int message_size = client_message_size + 2; //Add 2 for start and end characters
+    int message_size = client_message_size + 1; //Add 1 for Start-of-Text character
     char message[message_size]; 
     char *message_ptr = message;
 

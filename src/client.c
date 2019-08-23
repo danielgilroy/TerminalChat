@@ -89,10 +89,10 @@ void initialize_chat(){
     mvwprintw(text_win, 0, 0, INPUT_INDICATOR);
 
     //Get maximum input length from either screen size or buffer
-    if((COLS - 11) < (MESSAGE_LENGTH - 3)){
+    if((COLS - 11) < (MESSAGE_SIZE - 2)){
         input_length = COLS - 11;
     }else{
-        input_length = MESSAGE_LENGTH - 3; //Remove 3 for start, end, and NUL characters      
+        input_length = MESSAGE_SIZE - 2; //Remove 2 for start and end control characters      
     }
 
     //Refresh windows so they appear on screen
@@ -103,7 +103,7 @@ void initialize_chat(){
 void initialize_connection(char *ip, int port){
 
     int bytes_recv;
-    char response[MESSAGE_LENGTH];
+    char response[MESSAGE_SIZE];
 
     bytes_recv = join_server(ip, port, response);    
 
@@ -123,12 +123,12 @@ void initialize_connection(char *ip, int port){
 void *incoming_messages(){
 
     int bytes_recv;
-    char server_message[MESSAGE_LENGTH + 1];
-    server_message[MESSAGE_LENGTH] = '\0';
+    char server_message[MESSAGE_SIZE + 1];
+    server_message[MESSAGE_SIZE] = '\0';
      
     while(1){
 
-        bytes_recv = receive_message(server_message, MESSAGE_LENGTH);
+        bytes_recv = receive_message(server_message, MESSAGE_SIZE);
     
         if(bytes_recv <= 0){
             if(bytes_recv == 0){
@@ -154,14 +154,15 @@ void *incoming_messages(){
 void outgoing_messages(){
 
     int status = 0;
-    size_t message_size = 0;
-    char user_message[MESSAGE_LENGTH];
-    user_message[0] = '\0';
+    int cmd_length = 0;
+    size_t message_size = 1; //Size one to hold NUL character
+    char message[MESSAGE_SIZE];
+    message[0] = '\0';
 
     do{
 
         //Ignore blank messages
-        if(!get_user_message(user_message, &message_size)){
+        if(!get_user_message(message, &message_size)){
             continue;
         }
 
@@ -172,12 +173,12 @@ void outgoing_messages(){
         wrefresh(text_win);
         pthread_mutex_unlock(&print_lock);
 
-        if(user_message[0] == '/'){
+        if(message[0] == '/'){
 
             /* --------------------- */
             /* Process local command */
             /* --------------------- */
-            local_commands(user_message, message_size);
+            local_commands(message, message_size);
 
             //Or fall through to send command to server
         }
@@ -190,7 +191,7 @@ void outgoing_messages(){
         if(connected){
             pthread_mutex_unlock(&connected_lock);
 
-            status = send_message(user_message, message_size);
+            status = send_message(message, message_size);
             check_status(status, "Error sending message to server");
         }
         pthread_mutex_unlock(&connected_lock);
@@ -198,7 +199,18 @@ void outgoing_messages(){
         wrefresh(chat_win);
         wrefresh(text_win);
 
-    }while(strcmp(user_message, "/q") && strcmp(user_message, "/quit") && strcmp(user_message, "/exit"));
+        if(strncmp(message, "/nick ", cmd_length = 6) == 0){
+            //Clear message since it may contain passwords
+            secure_zero(message + cmd_length, message_size - cmd_length);
+            //strncpy(message, "/nick ", cmd_length + 1);
+            message_size = cmd_length + 1; //Plus one to include NUL character
+        }else if(strncmp(message, "/register ", cmd_length = 10) == 0){
+            //Clear message since it may contain passwords
+            secure_zero(message + cmd_length, message_size - cmd_length);
+            message_size = cmd_length + 1; //Plus one to include NUL character
+        }
+
+    }while(strcmp(message, "/q") && strcmp(message, "/quit") && strcmp(message, "/exit"));
   
     pthread_mutex_lock(&print_lock);
     wprintw(chat_win, "\n -Leaving chat server-\n");
@@ -208,16 +220,21 @@ void outgoing_messages(){
 
 bool get_user_message(char *message, size_t *message_size){
 
-    char buffer[MESSAGE_LENGTH];
+    char buffer[MESSAGE_SIZE];
+    char display[MESSAGE_SIZE];
     buffer[0] = '\0';
+    display[0] = '\0';
 
-    //Get message from user and echo to screen
-    int c = 0;
+    int buffer_char = 0;
+    int display_char = 0;
+    int cmd_length = 0;
     int pos = 0; //Current position
     int end = 0; //End position
-    while((c = wgetch(text_win)) != '\n'){       
 
-        if(c == KEY_LEFT){ //Move cursor left
+    //Get message from user and echo to screen
+    while((buffer_char = wgetch(text_win)) != '\n'){       
+
+        if(buffer_char == KEY_LEFT){ //Move cursor left
             if(pos > 0){
                 pos--;  
                 pthread_mutex_lock(&print_lock);
@@ -225,7 +242,7 @@ bool get_user_message(char *message, size_t *message_size){
                 wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);
             }
-        }else if(c == KEY_RIGHT){ //Move cursor right
+        }else if(buffer_char == KEY_RIGHT){ //Move cursor right
             if(pos < end){
                 pos++;
                 pthread_mutex_lock(&print_lock);      
@@ -233,33 +250,39 @@ bool get_user_message(char *message, size_t *message_size){
                 wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);
             }
-        }else if(c == KEY_UP){ //Insert previous sent message into buffer
-            end = *message_size;
+        }else if(buffer_char == KEY_UP){ //Insert previous sent message into buffer
+            end = *message_size - 1;
             pos = end;
             pthread_mutex_lock(&print_lock);
             for(int i = 0; i < end; i++){
-                buffer[i] = message[i];
-                mvwprintw(text_win, 0, INPUT_START + i, "%c", message[i]);
+                buffer_char = message[i];
+                buffer[i] = buffer_char;
+                display_char = buffer_char;
+                mvwprintw(text_win, 0, INPUT_START + i, "%c", display_char);
             }
             wmove(text_win, 0, INPUT_START + pos);
             wclrtoeol(text_win);
             wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
-        }else if(c == KEY_DOWN){ //Clear the current buffer
+        }else if(buffer_char == KEY_DOWN){ //Clear the current buffer
             end = 0;
             pos = 0;
+            //memset(buffer, '\0', 11); //Erase command from buffer 
+            buffer[0] = '\0';
+            display[end] = '\0';
             pthread_mutex_lock(&print_lock);
             mvwprintw(text_win, 0, 0, INPUT_INDICATOR);
             wclrtoeol(text_win);
             wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
-        }else if(c == KEY_BACKSPACE){ //Erase character to left of cursor
+        }else if(buffer_char == KEY_BACKSPACE){ //Erase character to left of cursor
             if(pos > 0){
                 //Shift remaining characters to the left
                 pthread_mutex_lock(&print_lock);
                 for(int i = pos; i < end; i++){
                     buffer[i - 1] = buffer[i];
-                    mvwprintw(text_win, 0, INPUT_START + i - 1, "%c", buffer[i]);
+                    display[i - 1] = display[i];
+                    mvwprintw(text_win, 0, INPUT_START + i - 1, "%c", display[i]);
                 }
                 pthread_mutex_unlock(&print_lock);
 
@@ -267,57 +290,77 @@ bool get_user_message(char *message, size_t *message_size){
                 pos--;
                 end--;
                 buffer[end] = '\0';
+                display[end] = '\0';
                 pthread_mutex_lock(&print_lock);
                 mvwprintw(text_win, 0, INPUT_START + end, " ");
                 wmove(text_win, 0, INPUT_START + pos);
                 wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock);    
             }
-        }else if(c == KEY_DC){ //Erase character to right of cursor
+        }else if(buffer_char == KEY_DC){ //Erase character to right of cursor
             if(pos < end){
                 //Shift remaining characters to the left
                 pthread_mutex_lock(&print_lock);
                 for(int i = pos; i < end - 1; i++){
                     buffer[i] = buffer[i + 1];
-                    mvwprintw(text_win, 0, INPUT_START + i, "%c", buffer[i + 1]);
+                    display[i] = display[i + 1];
+                    mvwprintw(text_win, 0, INPUT_START + i, "%c", display[i + 1]);
                 }
                 pthread_mutex_unlock(&print_lock);
 
                 //Insert empty character at the end of the message
                 end--; 
                 buffer[end] = '\0';
+                display[end] = '\0';
                 pthread_mutex_lock(&print_lock);
                 mvwprintw(text_win, 0, INPUT_START + end, " ");
                 wmove(text_win, 0, INPUT_START + pos);
                 wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock); 
             }
-        }else if(end < input_length && (c >= 32 && c <= 127)){ //Write character to buffer
+        }else if(end < input_length && (buffer_char >= 32 && buffer_char <= 127)){ //Write character to buffer
             //Shift remaining characters to the right
             pthread_mutex_lock(&print_lock);
             for(int i = end; i > pos; i--){
                 buffer[i] = buffer[i - 1];
-                mvwprintw(text_win, 0, INPUT_START + i, "%c", buffer[i]);
+                display[i] = display[i - 1];
+                mvwprintw(text_win, 0, INPUT_START + i, "%c", display[i]);
             }
             pthread_mutex_unlock(&print_lock);
+
+            //Hide on-screen passwords with asterisks
+            display_char = buffer_char;
+            if(display_char != ' ' && strncmp(buffer, "/nick ", cmd_length = 6) == 0){
+                if(memchr(buffer + cmd_length, ' ', end - cmd_length + 1)){
+                    display_char = '*';
+                }
+            }else if(display_char != ' ' && strncmp(buffer, "/register ", cmd_length = 10) == 0){
+                if(memchr(buffer + cmd_length, ' ', end - cmd_length + 1)){
+                    display_char = '*';
+                }
+            }
 
             //Insert new character at the cursor position
             pthread_mutex_lock(&print_lock);
             wmove(text_win, 0, INPUT_START + pos);
-            wprintw(text_win, "%c", c);
+            wprintw(text_win, "%c", display_char);
             wrefresh(text_win);
             pthread_mutex_unlock(&print_lock);
-            buffer[pos] = c;
+            buffer[pos] = buffer_char;
+            display[pos] = display_char;
             pos++;
             end++;
+            buffer[end] = '\0';
+            display[end] = '\0';
         }
     }
 
-    //NUL terminate user message and set message_size
+    //Copy buffer to external message and set message_size
     if(end > 0){
-        buffer[end] = '\0';
-        strncpy(message, buffer, end + 1);
-        *message_size = end;
+        *message_size = end + 1;
+        strncpy(message, buffer, *message_size);
+        //Clear buffer since it may contain passwords
+        secure_zero(buffer, *message_size);
         return true;
     } 
 
@@ -418,6 +461,17 @@ void print_time(){
     wrefresh(text_win); 
 }
 
+//Function used to clear passwords from memory
+void secure_zero(volatile void *s, size_t n){
+    if(s == NULL){return;}
+    volatile uint8_t *p = s; //Use volatile to prevent compiler optimization
+    while(n > 0){
+        *p = 0;
+        p++;
+        n--;
+    }
+}
+
 void shutdown_chat(){
     check_status(endwin(), "Error closing ncurses");
     exit(0);
@@ -426,3 +480,4 @@ void shutdown_chat(){
 static void shutdown_handler(int sig_num){
     shutdown_chat();
 }
+

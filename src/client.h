@@ -25,6 +25,7 @@ bool get_user_message(char *, size_t *);
 void local_commands(char *, size_t);
 void print_to_chat(char *, int);
 void print_time();
+void secure_zero(volatile void *, size_t );
 void shutdown_chat();
 static void shutdown_handler(int);
 
