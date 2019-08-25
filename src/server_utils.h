@@ -3,7 +3,9 @@
 
 #include "server_shared.h"
 
-//char *prepare_client_message2(char *, int *);
+#define RESTRICTED_STARTS {"client", "server"}
+#define RESTRICTED_CONTAINS {"admin", "moderator"}
+
 size_t prepare_client_message(char *, ssize_t);
 char *add_username_to_message(const char *, const char *, const char *);
 ssize_t send_message(int, const char *, size_t);
@@ -22,6 +24,8 @@ table_entry_t *find_user(const char *);
 table_entry_t *change_username(table_entry_t **, char *);
 void delete_user(table_entry_t **);
 int id_compare(table_entry_t *, table_entry_t *);
+int strncmp_case_insensitive(const char *, const char *, size_t);
+bool string_contains(const char *, const char *);
 void print_time();
 int check_status(int, char *);
 void secure_zero(volatile void *, size_t);

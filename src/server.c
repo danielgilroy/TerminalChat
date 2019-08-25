@@ -20,6 +20,11 @@ unsigned int port_number = DEFAULT_PORT_NUMBER;
 
 int main(int argc, char* argv[]){
 
+    //Setup signal handlers to properly close server
+    signal(SIGINT, terminate_server); //CTRL + C
+    signal(SIGQUIT, terminate_server); //CTRL + BACKSLASH
+    signal(SIGSEGV, terminate_server); //Memory access violation
+
     //Get port number from argument
     if(argc > 1){
         port_number = atoi(argv[1]);
@@ -40,6 +45,11 @@ int main(int argc, char* argv[]){
     start_server();
 
     printf("**Shutting Down Server**\n");
+
+    //Turn echoing back on
+    newtc.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newtc);
+    
     pthread_mutex_destroy(&spam_lock);
 
     return 0;
@@ -88,12 +98,10 @@ void create_admin(){
     char admin_password2[MESSAGE_SIZE];
     char hashed_password[crypto_pwhash_STRBYTES];
     char password_error[MESSAGE_SIZE];
-    char *matching_error = "";
+    char *matching_error = NULL;
 
     const char *query;
     sqlite3_stmt *stmt;
-
-
 
     printf("**Creating Admin Account**\n");
 
@@ -104,7 +112,7 @@ void create_admin(){
         password_error[0] = '\0';
 
         //Print error message from previous itteration
-        if(*matching_error){
+        if(matching_error){
             printf("%s\n\n", matching_error);
         }
 
@@ -113,7 +121,7 @@ void create_admin(){
                 printf("%s\n\n", password_error + strlen(SERVER_PREFIX)); //Skip over SERVER_PREFIX
             }
 
-            printf("Enter password for account \"Admin\": ");
+            printf("Enter password for \"Admin\" account: ");
             get_admin_password(admin_password);
             printf("\n");
 
@@ -523,7 +531,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
 
                         continue;
                     }
-                    
+
                     if(client_msg[0] == '\0'){
                         /* ----------------------------- */
                         /* Ignore client's empty message */
@@ -671,6 +679,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         user->message = NULL;
                         user->message_size = 1; //Set to 1 for empty string size "\0"
                     }
+
                 }
             }
         }
@@ -797,6 +806,16 @@ void remove_client(table_entry_t *user, char *server_msg_prefixed, char **who_me
     //Remove user entry from server and set who_messages for rebuild
     remove_user(&user);
     who_messages[room_id][0] = '\0';
+}
+
+void terminate_server(int sig_num){
+    //Turn echoing back on
+    struct termios oldtc, newtc;
+    tcgetattr(STDIN_FILENO, &oldtc);
+    newtc = oldtc;
+    newtc.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newtc);
+    exit(EXIT_SUCCESS);
 }
 
 void shutdown_server(char **who_messages){

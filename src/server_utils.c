@@ -138,19 +138,16 @@ int get_admin_password(char *admin_password){
     int pos = 0;
 
     while((c = getchar()) != '\n'){
-        // if(pos > 0 && (c == 0x08 || c == 0x7F)){
-        //     printf("\x7F");
-        //     pos--;
-        // }else 
-        if(pos < PASSWORD_SIZE_MAX - 1 && c >= 32 && c < 127){
+        if(pos > 0 && c == 0x7F){
+             pos--;
+        }else if(pos < PASSWORD_SIZE_MAX - 1 && c >= 0x20 && c <= 0x7E){
             admin_password[pos] = c;
             pos++;
-            printf("*");
         }
     }
     admin_password[pos] = '\0';
     
-    return pos + 1;
+    return pos + 1; //Return size of string
 }
 
 bool is_password_invalid(const char *password, char *error_message){
@@ -236,26 +233,24 @@ bool is_username_invalid(const char *username, char *error_message){
 
 bool is_username_restricted(const char *username, char *error_message){
     
-    char *restricted_contains[] = {"Admin", "Server", "Client", "Administrator", "Moderator"};
-    char *restricted_exact[] = {"Empty"};
+    char *restricted_starts[] = RESTRICTED_STARTS;
+    char *restricted_contains[] = RESTRICTED_CONTAINS;
+    char *restricted_word = NULL;
 
-    //Allow restricted usernames that are registered in database and password protected
-    if(strcasecmp(username, "Admin") == 0){
-        return false;
-    }
-
-    //Check if username contains a restricted keyword
-    for(int i = 0; i < sizeof(restricted_contains) / sizeof(restricted_contains[0]); i++){
-        if(strncasecmp(username, restricted_contains[i], strlen(restricted_contains[i])) == 0){
-            sprintf(error_message, SERVER_PREFIX "Usernames containing \"%s\" are restricted", restricted_contains[i]);
+    //Check if username starts with a restricted keyword
+    for(int i = 0; i < sizeof(restricted_starts) / sizeof(restricted_starts[0]); i++){
+        restricted_word = restricted_starts[i];
+        if(strncmp_case_insensitive(username, restricted_starts[i], strlen(restricted_word)) == 0){
+            sprintf(error_message, SERVER_PREFIX "Usernames starting with \"%s\" are restricted", restricted_word);
             return true;  
         }
     }
 
-    //Check if username is a restricted keyword
-    for(int i = 0; i < sizeof(restricted_exact) / sizeof(restricted_exact[0]); i++){
-        if(strcasecmp(username, restricted_exact[i]) == 0){
-            sprintf(error_message, SERVER_PREFIX "Username \"%s\" is restricted", username);
+    //Check if username contains a restricted keyword
+    for(int i = 0; i < sizeof(restricted_contains) / sizeof(restricted_contains[0]); i++){
+        restricted_word = restricted_contains[i];
+        if(string_contains(username, restricted_word)){
+            sprintf(error_message, SERVER_PREFIX "Usernames containing \"%s\" are restricted", restricted_word);
             return true;  
         }
     }
@@ -293,9 +288,7 @@ void rebuild_who_message(char **who_messages, int room_id){
         
         //Check if chat room has users
         int room_user_count = HASH_COUNT(active_users[room_id]);
-        if(room_user_count == 0){
-            strncat(who_messages[room_id], "Empty", WHO_MESSAGE_SIZE);
-        }else{
+        if(room_user_count > 0){
 
             //Get who_message string length - Add extra 1 for null character
             who_message_size = strlen(who_messages[room_id]) + (room_user_count * USERNAME_SIZE) + 1;
@@ -400,7 +393,43 @@ void delete_user(table_entry_t **user) {
 }
 
 int id_compare(table_entry_t *a, table_entry_t *b){
-    return (strcasecmp(a->id, b->id));
+    return (strncmp_case_insensitive(a->id, b->id, USERNAME_SIZE));
+}
+
+int strncmp_case_insensitive(const char *a, const char *b, size_t n){
+  int a_char, b_char;
+  do{
+     a_char = (unsigned char) *a++;
+     b_char = (unsigned char) *b++;
+     a_char = tolower(toupper(a_char)); //Round-trip conversion for issues where the uppercase char 
+     b_char = tolower(toupper(b_char)); //does not have a 1-to-1 mapping with lowercase ones
+     n--;
+   }while(a_char == b_char && a_char != '\0' && n > 0);
+   return a_char - b_char;
+}
+
+bool string_contains(const char *string, const char *substring){
+
+    const char *substring_ptr = substring;
+    int c = 0;
+
+    do{
+        c = (unsigned char) *string;
+        if(tolower(toupper(c)) == *substring_ptr){
+            substring_ptr++;
+        }else if(substring_ptr != substring){
+            //Reset substring_ptr and test current string character again
+            substring_ptr = substring;
+            continue;
+        }
+        string++;
+    }while(*string != '\0' && *substring_ptr != '\0');
+
+    if(*substring_ptr == '\0'){
+        return true;
+    }
+    
+    return false;
 }
 
 void print_time(){

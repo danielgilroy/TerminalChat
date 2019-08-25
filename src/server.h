@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #include "server_shared.h"
 #include "server_commands.h"
@@ -31,6 +32,7 @@ int check_for_spamming(table_entry_t *, char *);
 void private_message(table_entry_t *, char *, size_t, char *);
 void public_message(table_entry_t *, char *, size_t);
 void remove_client(table_entry_t *, char *, char **);
+void terminate_server(int sig_num);
 void shutdown_server(char **);
 
 #endif

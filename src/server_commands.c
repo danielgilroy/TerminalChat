@@ -204,11 +204,11 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
     //Get username and one password from client's message
     get_username_and_passwords(cmd_length, client_msg, &new_name, &password, NULL);
                             
-    //Check if the username is valid or restricted
-    if(is_username_invalid(new_name, server_msg) || is_username_restricted(new_name, server_msg)){
+    //Check if username is invalid
+    if(is_username_invalid(new_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
-    }       
+    }        
 
     //Check if client already has the username
     if(strcmp(old_name, new_name) == 0){
@@ -294,6 +294,12 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
             fprintf(stderr, "SQL error while getting user type: %s\n", sqlite3_errmsg(user_db));    
         }
         sqlite3_finalize(stmt);
+    }else{
+        //If not registered, check if username is restricted
+        if(is_username_restricted(new_name, server_msg)){
+            send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+            return;
+        }      
     }
     
     //Check if username is already in use on the server
@@ -492,12 +498,18 @@ void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, cha
     //Get username and passwords from client's message
     get_username_and_passwords(cmd_length, client_msg, &new_name, &password, &password2);
 
-    //Check if the username is invalid or restricted
-    if(is_username_invalid(new_name, server_msg) || is_username_restricted(new_name, server_msg)){
+    //Check if username is invalid
+    if(is_username_invalid(new_name, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }       
         
+    //If not an admin, check if username is restricted
+    if(!user->is_admin && is_username_restricted(new_name, server_msg)){
+        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+        return;
+    }       
+
     //Check if username already exists in database
     query = "SELECT id FROM users WHERE id = ?1;";
     sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
