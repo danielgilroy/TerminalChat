@@ -17,7 +17,7 @@
 #define LISTEN_BACKLOG 10
 #define MAX_SOCKETS 256 //Max FD limit on linux is set to 1024 by default but can be changed
 
-#define SPAM_MESSAGE_LIMIT 10000 //Max messages within spam interval window
+#define SPAM_MESSAGE_LIMIT 10 //Max messages within spam interval window
 #define SPAM_INTERVAL_WINDOW 10 //Interval window (in seconds) for max message limit
 #define SPAM_TIMEOUT_LENGTH 20 //Timeout period (in seconds) for detected spammer to wait
 
