@@ -47,8 +47,7 @@ int main(int argc, char* argv[]){
     printf("**Shutting Down Server**\n");
 
     //Turn echoing back on
-    newtc.c_lflag |= (ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newtc);
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldtc);
     
     pthread_mutex_destroy(&spam_lock);
 
@@ -479,7 +478,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
 
                     //Copy packet message to client message
                     if(packet_ptr[0] == MESSAGE_START){
-                        //Skip over message start control character
+                        //Skip over message-start control character
                         packet_ptr++;
                         recv_status--;
                         //Copy the new message
@@ -499,12 +498,13 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                     }
 
                     //Prepare client message for processing
-                    msg_size = prepare_client_message(client_msg, recv_status);
+                    msg_size = prepare_client_message(client_msg, &recv_status);
 
-                    //Check if message is complete or incomplete
+                    //Check if message is completed or not
                     if(client_msg[msg_size - 1] == MESSAGE_END){
                         //Change MESSAGE_END ending to "\0" and process message
                         client_msg[msg_size - 1] = '\0';
+                        //Reset flag for next message
                         expect_ending_char = false;
                     }else if(expect_ending_char){ 
                         
@@ -523,11 +523,16 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         user->message = incomplete_msg;
                         user->message_size = msg_size;
 
-                        //Adjust recv_status to remaining bytes not yet processed
-                        recv_status -= (ssize_t) (msg_size);
-                        
-                        //Point to next message in the packet
-                        packet_ptr += (msg_size);
+                        //Adjust recv_status to remaining bytes and point to next message
+                        if(msg_size > 1){
+                            recv_status -= (ssize_t) (msg_size - 1);
+                            packet_ptr += (msg_size - 1);
+                        }else{
+                            //Subtract 1 if there is only a single control character remaining
+                            //Fail safe to prevent infinite loop on bad input
+                            recv_status -= 1;
+                            packet_ptr += 1;
+                        }
 
                         continue;
                     }
@@ -608,6 +613,18 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                             secure_zero(client_msg, msg_size);
                             secure_zero(user->message, msg_size);
 
+                        }else if(strcmp(client_msg, "/unregister") == 0){
+                            //Inform client of /unregister usage
+                            unregister_cmd(client_socket);
+                            
+                        }else if(strncmp(client_msg, "/unregister ", cmd_length = 12) == 0){
+                            //Unregister username from user database
+                            unregister_arg_cmd(cmd_length, user, client_msg, server_msg_prefixed);
+                            //Clear passwords from every buffer
+                            secure_zero(packet_msg, msg_size);
+                            secure_zero(client_msg, msg_size);
+                            secure_zero(user->message, msg_size);
+
                         }else if(strcmp(client_msg, "/admin") == 0){
                             //Inform client of /admin usage
                             admin_cmd(client_socket);
@@ -626,7 +643,7 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         }else{
                             //Remove arguments after the command if they exist
                             char *arguments = memchr(client_msg, ' ', msg_size);
-                            if(arguments != NULL){
+                            if(arguments){
                                 arguments[0] = '\0';
                             }
                             //Inform client of invalid command
@@ -679,7 +696,6 @@ void process_clients(char *server_msg_prefixed, char **who_messages){
                         user->message = NULL;
                         user->message_size = 1; //Set to 1 for empty string size "\0"
                     }
-
                 }
             }
         }
@@ -753,8 +769,8 @@ void private_message(table_entry_t *user, char *client_msg, size_t msg_size, cha
     }
 
     //Add sender's username to message
-    char *postfix = ">> ";
     char *username = user->id;
+    char *postfix = PRIVATE_PREFIX;
     message = add_username_to_message(message, username, postfix);
     size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for MESSAGE_START
 
@@ -774,7 +790,7 @@ void public_message(table_entry_t *user, char *client_msg, size_t msg_size){
     char *username = user->id;
 
     //Add sender's username to message
-    char *postfix = ": ";
+    char *postfix = PUBLIC_PREFIX;
     char *message = add_username_to_message(client_msg, username, postfix);      
     size_t additional_length = strlen(username) + strlen(postfix) + 1; //Add one for MESSAGE_START       
 
@@ -808,13 +824,12 @@ void remove_client(table_entry_t *user, char *server_msg_prefixed, char **who_me
     who_messages[room_id][0] = '\0';
 }
 
-void terminate_server(int sig_num){
+static void terminate_server(int sig_num){
     //Turn echoing back on
-    struct termios oldtc, newtc;
-    tcgetattr(STDIN_FILENO, &oldtc);
-    newtc = oldtc;
-    newtc.c_lflag |= (ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newtc);
+    struct termios tc;
+    tcgetattr(STDIN_FILENO, &tc);
+    tc.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &tc);
     exit(EXIT_SUCCESS);
 }
 

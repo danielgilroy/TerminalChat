@@ -1,6 +1,6 @@
 #include "server_utils.h"
 
-size_t prepare_client_message(char *client_message, ssize_t recv_status){
+size_t prepare_client_message(char *client_message, ssize_t *recv_status){
 
     //Replace ending \n with \0 or ending \r\n with \0\0 if they exist
     for(size_t i = 0; i < MESSAGE_SIZE; i++){
@@ -17,14 +17,15 @@ size_t prepare_client_message(char *client_message, ssize_t recv_status){
     }
     
     //Nul terminate end of message if no ending characters were found 
-    client_message[recv_status] = '\0';
-    return (size_t) (recv_status + 1);
+    client_message[*recv_status] = '\0';
+    (*recv_status)++;
+    return (size_t) (*recv_status);
 }
 
-char *add_username_to_message(const char *message, const char *username, const char *suffix){
+char *add_username_to_message(const char *message, const char *username, const char *postfix){
 //NOTE: Calling function must call free on the allocated memory
 
-    size_t length = 1 + USERNAME_SIZE + strlen(suffix) + MESSAGE_SIZE + 1;
+    size_t length = 1 + USERNAME_SIZE + strlen(postfix) + MESSAGE_SIZE + 1;
     char *message_result = calloc(length, sizeof(char));
     if(message_result == NULL){
         fprintf(stderr, "Error allocating memory");
@@ -35,7 +36,7 @@ char *add_username_to_message(const char *message, const char *username, const c
     message_result[0] = MESSAGE_START;
     message_result[1] = '\0';
     strncat(message_result, username, length);
-    strncat(message_result, suffix, length);
+    strncat(message_result, postfix, length);
     strncat(message_result, message, length);
     message_result[length - 1] = '\0'; //Ensure NULL termination
     return message_result;
@@ -109,7 +110,7 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
 
     //Check if the user entered a password
     *password = memchr(*new_name, ' ', USERNAME_SIZE);
-    if(*password != NULL){
+    if(*password){
 
         //Null terminate username and get pointer to password
         (*password)[0] = '\0';
@@ -119,14 +120,14 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
 
         //Check if the user entered a second password
         *password2 = memchr(*password, ' ', PASSWORD_SIZE_MAX);
-        if(*password2 != NULL){
+        if(*password2){
 
             //Null terminate previous password and get pointer to next password
             (*password2)[0] = '\0';
             (*password2)++;
         }
     }else{
-        if(password2 != NULL){ //Caller wants a second password but first password failed
+        if(password2){ //Caller wants a second password but first password failed
             *password2 = NULL; //Ensure password2 doesn't point to garbage values
         }
     }
@@ -148,6 +149,30 @@ int get_admin_password(char *admin_password){
     admin_password[pos] = '\0';
     
     return pos + 1; //Return size of string
+}
+
+bool are_passwords_invalid(const char *password1, const char *password2, char *error_message){
+
+    //Check if password1 exists
+    if(password1 == NULL || password2 == NULL){
+        sprintf(error_message, SERVER_PREFIX "The command requires a password be entered twice");
+        return true;
+    }
+    //Check if password1 is invalid
+    if(is_password_invalid(password1, error_message)){
+        return true;
+    }
+    //Check if password2 is invalid
+    if(is_password_invalid(password2, error_message)){
+        return true;
+    }
+    //Check is both passwords match
+    if(strcmp(password1, password2) != 0){
+        sprintf(error_message, SERVER_PREFIX "The two entered passwords do not match");
+        return true;
+    }
+    
+    return false;
 }
 
 bool is_password_invalid(const char *password, char *error_message){
@@ -176,32 +201,40 @@ bool is_password_invalid(const char *password, char *error_message){
     return false;
 }
 
-bool are_passwords_invalid(const char *password1, const char *password2, char *error_message){
+bool is_password_incorrect(const char *username, const char *password, const char *db_hashed_password){
 
-    //Check if password1 exists
-    if(password1 == NULL){
-        sprintf(error_message, SERVER_PREFIX "The command requires a password be entered twice");
-        return true;
+    char *query = NULL;
+    sqlite3_stmt *stmt;
+
+    char hashed_password[crypto_pwhash_STRBYTES];
+
+    //Compare database password with client password using libsodium
+    if(crypto_pwhash_str_verify(db_hashed_password, password, strlen(password)) != 0){
+        return true; //Password is incorrect
     }
-    //Check if password1 is invalid
-    if(is_password_invalid(password1, error_message)){
-        return true;
+
+    //Check if hashed password needs to be rehashed
+    if(crypto_pwhash_str_needs_rehash(db_hashed_password, PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0){
+
+        //Hash password with libsodium
+        if(crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0){
+            fprintf(stderr, "Ran out of memory during hash function\n");
+            return false;
+        }
+
+        //Update the rehashed password for the registered user
+        query = "UPDATE users SET password = ?1 WHERE id = ?2;";
+        sqlite3_prepare(user_db, query, -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, hashed_password, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC);
+        if(sqlite3_step(stmt) != SQLITE_DONE){
+            fprintf(stderr, "SQL error while updating password: %s\n", sqlite3_errmsg(user_db));
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_finalize(stmt);
     }
-    //Check if password2 exists
-    if(password2 == NULL){
-        sprintf(error_message, SERVER_PREFIX "The command requires the password be repeated");
-        return true;
-    }
-    //Check if password2 is invalid
-    if(is_password_invalid(password2, error_message)){
-        return true;
-    }
-    //Check is both passwords match
-    if(strcmp(password1, password2) != 0){
-        sprintf(error_message, SERVER_PREFIX "The two entered passwords do not match");
-        return true;
-    }
-    
+
     return false;
 }
 
@@ -370,7 +403,7 @@ table_entry_t *find_user(const char *username){
     table_entry_t *user = NULL;
     for(int room_index = 0; room_index < MAX_ROOMS; room_index++){
         HASH_FIND_STR(active_users[room_index], username, user);  //user: output pointer
-        if(user != NULL){
+        if(user){
             return user;
         }
     }

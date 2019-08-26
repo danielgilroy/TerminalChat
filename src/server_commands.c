@@ -24,18 +24,18 @@ void whois_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
     char *username = user->id;
     char *server_msg = server_msg_prefixed + 1;
     const char *server_msg_literal = NULL;
-    char *target_name = NULL;
+    char *target_username = NULL;
 
     //Get username from client's message
-    get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
+    get_username_and_passwords(cmd_length, client_msg, &target_username, NULL, NULL);
                             
     //Check if the username is valid
-    if(is_username_invalid(target_name, server_msg)){
+    if(is_username_invalid(target_username, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
     
-    if(strcmp(target_name, username) == 0){
+    if(strcmp(target_username, username) == 0){
         sprintf(server_msg, SERVER_PREFIX "Your address is %s:%d", user->ip, user->port);
     }else{
 
@@ -47,15 +47,15 @@ void whois_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
         }
 
         //Get user from active_users hash table
-        table_entry_t *target = find_user(target_name);
+        table_entry_t *target = find_user(target_username);
         if(target == NULL){
             //Username does not exist
-            sprintf(server_msg, SERVER_PREFIX "The user \"%s\" does not exist", target_name);
+            sprintf(server_msg, SERVER_PREFIX "The user \"%s\" does not exist", target_username);
             send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
             return;
         }
 
-        sprintf(server_msg, SERVER_PREFIX "The address of \"%s\" is %s:%d", target_name, target->ip, target->port);
+        sprintf(server_msg, SERVER_PREFIX "The address of \"%s\" is %s:%d", target_username, target->ip, target->port);
     }
 
     send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
@@ -197,7 +197,6 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
     char *user_type = NULL;
     char *password = NULL;
     char *db_hashed_password = NULL;
-    char hashed_password[crypto_pwhash_STRBYTES];
 
     strncpy(old_name, (*user)->id, USERNAME_SIZE);
 
@@ -223,9 +222,9 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
     sqlite3_bind_text(stmt, 1, new_name, -1, SQLITE_STATIC);
     if((status = sqlite3_step(stmt)) == SQLITE_ROW){
         db_hashed_password = strdup((char *) sqlite3_column_text(stmt, 0));
-        //printf("The SQL query returned: %s\n", db_hashed_password);
     }else if(status != SQLITE_DONE){
         fprintf(stderr, "SQL error while getting password: %s\n", sqlite3_errmsg(user_db));
+        return;
     }
     sqlite3_finalize(stmt);
 
@@ -248,39 +247,12 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
             return;     
         }
 
-        //Compare database password with client password using libsodium
-        if(crypto_pwhash_str_verify(db_hashed_password, password, strlen(password)) != 0){
+        //Check if password is incorrect
+        if(is_password_incorrect(new_name, password, db_hashed_password)){
             server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "The specified password was incorrect";
             send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
-            free(db_hashed_password);
-            db_hashed_password = NULL;
             return;
         }
-
-        //Check if hashed password needs to be rehashed
-        if(crypto_pwhash_str_needs_rehash(db_hashed_password, PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0){
-
-            //Hash password with libsodium
-            if(crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
-                fprintf(stderr, "Ran out of memory during hash function\n");
-                exit(EXIT_FAILURE);
-            }
-
-            //Update the rehashed password for the registered user
-            query = "UPDATE users SET password = ?1 WHERE id = ?2;";
-            sqlite3_prepare(user_db, query, -1, &stmt, NULL);
-            sqlite3_bind_text(stmt, 1, hashed_password, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, new_name, -1, SQLITE_STATIC);
-            if(sqlite3_step(stmt) != SQLITE_DONE){
-                fprintf(stderr, "SQL error while updating password: %s\n", sqlite3_errmsg(user_db));
-                free(db_hashed_password);
-                db_hashed_password = NULL;
-                sqlite3_finalize(stmt);
-                return;
-            }
-            sqlite3_finalize(stmt);
-        }
-
         free(db_hashed_password);
         db_hashed_password = NULL;
 
@@ -329,7 +301,7 @@ void nick_arg_cmd(int cmd_length, table_entry_t **user, char *client_msg, char *
     
     //Send name change message to all clients if not in lobby
     if(room_id == LOBBY_ROOM_ID){
-        sprintf(server_msg, SERVER_PREFIX "Your username has been changed to \"%s\"", new_name);
+        sprintf(server_msg, SERVER_PREFIX "Your username has changed to \"%s\"", new_name);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
     }else{
         sprintf(server_msg, SERVER_PREFIX "%s changed their name to %s", old_name, new_name);
@@ -356,28 +328,28 @@ void where_cmd(table_entry_t *user, char *server_msg_prefixed){
 void where_arg_cmd(int cmd_length, int client_socket, char *client_msg, char *server_msg_prefixed){
 
     char *server_msg = server_msg_prefixed + 1;
-    char *target_name = NULL;
+    char *target_username = NULL;
 
     //Get username from client message
-    get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
+    get_username_and_passwords(cmd_length, client_msg, &target_username, NULL, NULL);
 
     //Check if the username is invalid
-    if(is_username_invalid(target_name, server_msg)){
+    if(is_username_invalid(target_username, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }     
 
     //Look for target user and return their location
-    table_entry_t *target_user = find_user(target_name);
+    table_entry_t *target_user = find_user(target_username);
     if(target_user){
         int room_id = target_user->room_id;
         if(room_id == LOBBY_ROOM_ID){
-            sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently in the lobby", target_name);
+            sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently in the lobby", target_username);
         }else{
-            sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently in chat room #%d", target_name, room_id);
+            sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently in chat room #%d", target_username, room_id);
         }
     }else{
-        sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently not on the server", target_name);
+        sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently not on the server", target_username);
     }
 
     //Inform client about the specified user
@@ -401,7 +373,7 @@ void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char
     char *username = user->id;
     char *server_msg = server_msg_prefixed + 1;
     const char *server_msg_literal = NULL;
-    char *target_name = NULL;
+    char *target_username = NULL;
 
     //Check if client isn't an admin
     if(!user->is_admin){
@@ -411,16 +383,16 @@ void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char
     }
 
     //Get username from client's message
-    get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
+    get_username_and_passwords(cmd_length, client_msg, &target_username, NULL, NULL);
 
     //Check if the username is invalid
-    if(is_username_invalid(target_name, server_msg)){
+    if(is_username_invalid(target_username, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }
 
     //Prevent client from kicking themself
-    if(strcmp(username, target_name) == 0){
+    if(strcmp(username, target_username) == 0){
         server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Using /kick on yourself is prohibited";
         send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
         return;
@@ -428,8 +400,8 @@ void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char
 
     //Look for user and perform the kick if located
     int target_room = 0;
-    table_entry_t *target_user = find_user(target_name);
-    if(target_user != NULL){
+    table_entry_t *target_user = find_user(target_username);
+    if(target_user){
 
         target_room = target_user->room_id;
 
@@ -449,19 +421,20 @@ void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char
         who_messages[target_room][0] = '\0';
 
         //Print kick message to server's terminal
-        printf("**%s in room #%d kicked from the server**\n", target_name, target_room);
+        printf("**%s in room #%d kicked from the server**\n", target_username, target_room);
 
         //Inform the chat room about the kick
-        sprintf(server_msg, SERVER_PREFIX "\"%s\" has been kicked from the server", target_name);
+        sprintf(server_msg, SERVER_PREFIX "\"%s\" has been kicked from the server", target_username);
         send_message_to_all(target_room, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 
         //Also inform client if they are in a different room or the lobby
         if(room_id != target_room || target_room == LOBBY_ROOM_ID){
             send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         }
+
     }else{
         //Inform client that user was not found
-        sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently not on the server", target_name);
+        sprintf(server_msg, SERVER_PREFIX "\"%s\" is currently not on the server", target_username);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
     }
 }
@@ -518,6 +491,7 @@ void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, cha
         user_exists = true;
     }else if(status != SQLITE_DONE){
         fprintf(stderr, "SQL error while checking if username exists: %s\n", sqlite3_errmsg(user_db));
+        return;
     }
     sqlite3_finalize(stmt);
     
@@ -549,9 +523,9 @@ void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, cha
     }
 
     //Hash password with libsodium
-    if (crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0) {
+    if(crypto_pwhash_str(hashed_password, password, strlen(password), PWHASH_OPSLIMIT, PWHASH_MEMLIMIT) != 0){
         fprintf(stderr, "Ran out of memory during hash function\n");
-        exit(EXIT_FAILURE);
+        return;
     }
 
     //Perform SQL query for either new user or password change
@@ -564,6 +538,7 @@ void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, cha
     if(is_new_user){
         if(status != SQLITE_DONE){
                 fprintf(stderr, "SQL error while registering username: %s\n", sqlite3_errmsg(user_db));
+                return;
         }else{
             //Print username registration message to server's terminal
             printf("**%s on socket %d registered username %s**\n", username, client_socket, new_name);
@@ -575,14 +550,131 @@ void register_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, cha
     }else{
         if(status != SQLITE_DONE){
             fprintf(stderr, "SQL error while changing user password: %s\n", sqlite3_errmsg(user_db));
+            return;
         }else{
             //Print password change message to server's terminal
             printf("**%s on socket %d changed their password**\n", username, client_socket);
             
             //Inform client of password change
-            server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Your username password has been changed";
+            server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Your username password has changed";
             send_message(client_socket, server_msg_literal, strlen(server_msg_prefixed) + 1);
         }
+    }
+}
+
+void unregister_cmd(int client_socket){
+    const char *server_msg_literal = NULL;
+    server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Type \"/unregister <username> <password>\" to unregister";
+    send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1); 
+}
+
+void unregister_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *server_msg_prefixed){
+
+    if(user == NULL){
+        return;
+    }
+
+    int client_socket = user->socket_fd;
+    char *username = user->id;
+    char *server_msg = server_msg_prefixed + 1;
+    const char *server_msg_literal = NULL;
+
+    int status;
+    char *query = NULL;
+    sqlite3_stmt *stmt;
+
+    char *target_username = NULL;
+    char *password = NULL;
+    char *password2 = NULL;
+    char *db_hashed_password = NULL;
+    char hashed_password[crypto_pwhash_STRBYTES];
+
+    //Get username and passwords from client's message
+    get_username_and_passwords(cmd_length, client_msg, &target_username, &password, &password2);
+
+    //Check if username is invalid
+    if(is_username_invalid(target_username, server_msg)){
+        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+        return;
+    }       
+
+    //Prevent unregistering main admin account
+    if(strcmp(target_username, "Admin") == 0){
+        server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Unregistering the main admin account is prohibited";
+        send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
+        return;
+    }
+
+    //Check if username is registered in database 
+    query = "SELECT password FROM users WHERE id = ?1;";
+    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, target_username, -1, SQLITE_STATIC);
+    if((status = sqlite3_step(stmt)) == SQLITE_ROW){
+        db_hashed_password = strdup((char *) sqlite3_column_text(stmt, 0));
+    }else if(status != SQLITE_DONE){
+        fprintf(stderr, "SQL error while getting password: %s\n", sqlite3_errmsg(user_db));
+        return;
+    }
+    sqlite3_finalize(stmt);
+    
+    if(!db_hashed_password){
+        //Inform client that username is not registered
+        sprintf(server_msg, SERVER_PREFIX "The username \"%s\" is not registered", target_username);
+        send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+        return;
+    } 
+
+    //Check password if not an admin
+    if(!user->is_admin){
+
+        //Check if password is valid
+        if(is_password_invalid(password, server_msg)){
+            send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+            return;  
+        }
+
+        //Check if password is incorrect
+        if(is_password_incorrect(target_username, password, db_hashed_password)){
+            server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "The specified password was incorrect";
+            send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
+            return;
+        }
+        free(db_hashed_password);
+        db_hashed_password = NULL;
+    }
+
+    //Perform SQL query for unregistering a username
+    query = "DELETE FROM users WHERE id = ?1;";
+    sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, target_username, -1, SQLITE_STATIC);
+    status = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if(status != SQLITE_DONE){
+            fprintf(stderr, "SQL error while unregistering username: %s\n", sqlite3_errmsg(user_db));
+            return;
+    }
+
+    //Print username unregistration message to server's terminal
+    printf("**%s on socket %d unregistered username %s**\n", username, client_socket, target_username);
+
+    //Inform client and target user of username unregistration
+    table_entry_t *target_user = NULL;
+    if(strncmp(username, target_username, USERNAME_SIZE) == 0){
+        target_user = user;
+        sprintf(server_msg, SERVER_PREFIX "You have unregistered your username \"%s\"", target_username);
+    }else{
+        target_user = find_user(target_username);
+        if(target_user){
+            sprintf(server_msg, SERVER_PREFIX "Your username \"%s\" has been unregistered", target_username);
+            send_message(target_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
+        }
+        sprintf(server_msg, SERVER_PREFIX "You have unregistered the username \"%s\"", target_username);
+    }
+    send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);  
+
+    //Change user type to "user" if it is "admin"
+    if(target_user && target_user->is_admin){
+        target_user->is_admin = false;
     }
 }
 
@@ -607,16 +699,9 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
     char *query = NULL;
     sqlite3_stmt *stmt;
 
-    char *target_name = NULL;
+    char *target_username = NULL;
     char *user_type = NULL;
     char *type_change = NULL;
-
-    //Allow usage for all admin accounts
-    /*if(!user->is_admin){
-        server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Only server admins can use the /admin command";
-        send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
-        return;
-    }*/
 
     //Allow usage for main admin account only
     if(strcmp(username, "Admin") != 0){
@@ -626,16 +711,16 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
     }
 
     //Get username from client's message
-    get_username_and_passwords(cmd_length, client_msg, &target_name, NULL, NULL);
+    get_username_and_passwords(cmd_length, client_msg, &target_username, NULL, NULL);
 
     //Check if the username is invalid
-    if(is_username_invalid(target_name, server_msg)){
+    if(is_username_invalid(target_username, server_msg)){
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         return;
     }   
 
     //Check if target user is the client
-    if(strcmp(target_name, username) == 0){
+    if(strcmp(target_username, username) == 0){
         //Inform client that changing their own account is prohibited
         server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Changing your own account type is prohibited";
         send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
@@ -643,7 +728,7 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
     }
 
     //Check if target user is the main admin account
-    if(strcmp(target_name, "Admin") == 0){
+    if(strcmp(target_username, "Admin") == 0){
         //Inform client that changing the main admin account is prohibited
         server_msg_literal = MESSAGE_START_STR SERVER_PREFIX "Changing the main admin account type is prohibited";
         send_message(client_socket, server_msg_literal, strlen(server_msg_literal) + 1);
@@ -653,11 +738,12 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
     //Check if username is registered in database and get user type
     query = "SELECT type FROM users WHERE id = ?1;";
     sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
-    sqlite3_bind_text(stmt, 1, target_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, target_username, -1, SQLITE_STATIC);
     if((status = sqlite3_step(stmt)) == SQLITE_ROW){
         user_type = strdup((char *) sqlite3_column_text(stmt, 0));
     }else if(status != SQLITE_DONE){
         fprintf(stderr, "SQL error while getting user type: %s\n", sqlite3_errmsg(user_db));
+        return;
     }
     sqlite3_finalize(stmt);
 
@@ -677,7 +763,7 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
         query = "UPDATE users SET type = ?1 WHERE id = ?2;";
         sqlite3_prepare_v2(user_db, query, -1, &stmt, NULL);
         sqlite3_bind_text(stmt, 1, type_change, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, target_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, target_username, -1, SQLITE_STATIC);
         if(sqlite3_step(stmt) != SQLITE_DONE){
             fprintf(stderr, "SQL error while changing user type: %s\n", sqlite3_errmsg(user_db));
             sqlite3_finalize(stmt); 
@@ -686,27 +772,27 @@ void admin_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
         sqlite3_finalize(stmt);
 
         //Look for user on server and change account type if located
-        table_entry_t *target_user = find_user(target_name);
-        if(target_user != NULL){
+        table_entry_t *target_user = find_user(target_username);
+        if(target_user){
 
             //Switch account type
             target_user->is_admin = !target_user->is_admin;
 
             //Inform target user of account type change
-            sprintf(server_msg, SERVER_PREFIX "Your account has changed to \"%s\" type", type_change);
+            sprintf(server_msg, SERVER_PREFIX "Your account type has changed to \"%s\"", type_change);
             send_message(target_user->socket_fd, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
         }
 
         //Print account type change message to server's terminal
-        printf("**Account \"%s\" changed to \"%s\" type**\n", target_name, type_change);
+        printf("**Account \"%s\" changed to \"%s\" type**\n", target_username, type_change);
         
         //Inform client of account type change
-        sprintf(server_msg, SERVER_PREFIX "Account \"%s\" changed to \"%s\" type", target_name, type_change);
+        sprintf(server_msg, SERVER_PREFIX "Account \"%s\" changed to \"%s\" type", target_username, type_change);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
 
     }else{
         //Inform client that target user is not registered
-        sprintf(server_msg, SERVER_PREFIX "The username \"%s\" is not registered", target_name);
+        sprintf(server_msg, SERVER_PREFIX "The username \"%s\" is not registered", target_username);
         send_message(client_socket, server_msg_prefixed, strlen(server_msg_prefixed) + 1);
     }
 }

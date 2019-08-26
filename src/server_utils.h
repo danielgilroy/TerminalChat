@@ -6,14 +6,15 @@
 #define RESTRICTED_STARTS {"client", "server"}
 #define RESTRICTED_CONTAINS {"admin", "moderator"}
 
-size_t prepare_client_message(char *, ssize_t);
+size_t prepare_client_message(char *, ssize_t *);
 char *add_username_to_message(const char *, const char *, const char *);
 ssize_t send_message(int, const char *, size_t);
 ssize_t send_message_to_all(int, const char *, size_t);
 void get_username_and_passwords(int, char *, char **, char **, char **);
 int get_admin_password(char *);
-bool is_password_invalid(const char *, char *);
 bool are_passwords_invalid(const char *, const char *, char *);
+bool is_password_invalid(const char *, char *);
+bool is_password_incorrect(const char *, const char *, const char *);
 bool is_username_invalid(const char *, char *);
 bool is_username_restricted(const char *, char *);
 void rebuild_who_message(char **, int);

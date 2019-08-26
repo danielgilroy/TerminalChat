@@ -18,6 +18,8 @@ void kick_cmd(int);
 void kick_arg_cmd(int, table_entry_t *, table_entry_t **, char *, char *, char **);
 void register_cmd(int);
 void register_arg_cmd(int, table_entry_t *, char *, char *);
+void unregister_cmd(int);
+void unregister_arg_cmd(int, table_entry_t *, char *, char *);
 void admin_cmd(int);
 void admin_arg_cmd(int, table_entry_t *, char *, char *);
 bool die_cmd(table_entry_t *);

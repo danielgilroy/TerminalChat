@@ -31,7 +31,10 @@
 #define MESSAGE_END 0x03 //End-of-Text control character
 #define MESSAGE_START 0x02 //Start-of-Text control character
 #define MESSAGE_START_STR "\x02" //Start-of-Text control character as a string
+
 #define SERVER_PREFIX "Server: " //Message prefix for server messages
+#define PUBLIC_PREFIX ": " //Message prefix for public messages
+#define PRIVATE_PREFIX ">> " //Message prefix for private messages
 
 #define PWHASH_OPSLIMIT crypto_pwhash_OPSLIMIT_INTERACTIVE //Use crypto_pwhash_OPSLIMIT_MODERATE for higher security
 #define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_INTERACTIVE //Use crypto_pwhash_MEMLIMIT_MODERATE for higher security
