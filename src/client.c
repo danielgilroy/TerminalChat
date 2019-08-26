@@ -14,7 +14,7 @@ int main(int argc, char *argv[]){
     char *ip = DEFAULT_IP_ADDRESS;
     unsigned int port = DEFAULT_PORT_NUMBER;
 
-    //Setup signal handlers to properly clost ncurses
+    //Setup signal handlers to properly close ncurses
     signal(SIGINT, shutdown_handler); //CTRL + C
     signal(SIGQUIT, shutdown_handler); //CTRL + BACKSLASH
     signal(SIGSEGV, shutdown_handler); //Memory access violation
@@ -112,6 +112,7 @@ void initialize_connection(char *ip, int port){
         wprintw(chat_win, "      -Ensure IP address and port number are correct-\n");
         wprintw(chat_win, "            -The chat client will close shortly-\n");
         wrefresh(chat_win);
+        wrefresh(text_win);
         sleep(10);
         shutdown_chat();
     }
@@ -133,13 +134,14 @@ void *incoming_messages(){
         if(bytes_recv <= 0){
             if(bytes_recv == 0){
                 wprintw(chat_win, "\n\n       -The connection to the server has been lost-\n");
-                wprintw(chat_win, "          -The chat client will close shortly-\n");
+                wprintw(chat_win, "           -The chat client will close shortly-\n");
             }else{
-                wprintw(chat_win, "\n\n  -An unknown error has occurred-\n");
-                wprintw(chat_win, "-The chat client will close shortly-\n");
+                wprintw(chat_win, "\n\n             -An unknown error has occurred-\n");
+                wprintw(chat_win, "           -The chat client will close shortly-\n");
             }
             
             wrefresh(chat_win);
+            wrefresh(text_win);
             pthread_mutex_lock(&connected_lock);
             connected = false;
             pthread_mutex_unlock(&connected_lock);
@@ -186,15 +188,8 @@ void outgoing_messages(){
         /* --------------------------- */
         /* Send user message to server */
         /* --------------------------- */
-
-        pthread_mutex_lock(&connected_lock);
-        if(connected){
-            pthread_mutex_unlock(&connected_lock);
-
-            status = send_message(message, message_size);
-            check_status(status, "Error sending message to server");
-        }
-        pthread_mutex_unlock(&connected_lock);
+        status = send_message(message, message_size);
+        check_status(status, "Error sending message to server");
 
         wrefresh(chat_win);
         wrefresh(text_win);
@@ -202,9 +197,12 @@ void outgoing_messages(){
         if(strncmp(message, "/nick ", cmd_length = 6) == 0){
             //Clear message since it may contain passwords
             secure_zero(message + cmd_length, message_size - cmd_length);
-            //strncpy(message, "/nick ", cmd_length + 1);
             message_size = cmd_length + 1; //Plus one to include NUL character
         }else if(strncmp(message, "/register ", cmd_length = 10) == 0){
+            //Clear message since it does contain passwords
+            secure_zero(message + cmd_length, message_size - cmd_length);
+            message_size = cmd_length + 1; //Plus one to include NUL character
+        }else if(strncmp(message, "/unregister ", cmd_length = 12) == 0){
             //Clear message since it may contain passwords
             secure_zero(message + cmd_length, message_size - cmd_length);
             message_size = cmd_length + 1; //Plus one to include NUL character
@@ -232,7 +230,15 @@ bool get_user_message(char *message, size_t *message_size){
     int end = 0; //End position
 
     //Get message from user and echo to screen
-    while((buffer_char = wgetch(text_win)) != '\n'){       
+    while((buffer_char = wgetch(text_win)) != '\n'){     
+
+        //Ignore input if not connected
+        pthread_mutex_lock(&connected_lock);
+        if(!connected){
+            pthread_mutex_unlock(&connected_lock);
+            continue;
+        }
+        pthread_mutex_unlock(&connected_lock);
 
         if(buffer_char == KEY_LEFT){ //Move cursor left
             if(pos > 0){
@@ -267,7 +273,6 @@ bool get_user_message(char *message, size_t *message_size){
         }else if(buffer_char == KEY_DOWN){ //Clear the current buffer
             end = 0;
             pos = 0;
-            //memset(buffer, '\0', 11); //Erase command from buffer 
             buffer[0] = '\0';
             display[end] = '\0';
             pthread_mutex_lock(&print_lock);
@@ -318,7 +323,7 @@ bool get_user_message(char *message, size_t *message_size){
                 wrefresh(text_win);
                 pthread_mutex_unlock(&print_lock); 
             }
-        }else if(end < input_length && (buffer_char >= 32 && buffer_char <= 127)){ //Write character to buffer
+        }else if(end < input_length && (buffer_char >= 0x20 && buffer_char <= 0x7E)){ //Write character to buffer
             //Shift remaining characters to the right
             pthread_mutex_lock(&print_lock);
             for(int i = end; i > pos; i--){
@@ -335,6 +340,10 @@ bool get_user_message(char *message, size_t *message_size){
                     display_char = '*';
                 }
             }else if(display_char != ' ' && strncmp(buffer, "/register ", cmd_length = 10) == 0){
+                if(memchr(buffer + cmd_length, ' ', end - cmd_length + 1)){
+                    display_char = '*';
+                }
+            }else if(display_char != ' ' && strncmp(buffer, "/unregister ", cmd_length = 12) == 0){
                 if(memchr(buffer + cmd_length, ' ', end - cmd_length + 1)){
                     display_char = '*';
                 }
@@ -425,23 +434,23 @@ void local_commands(char *user_message, size_t message_size){
 void print_to_chat(char * message, int bytes){
 
     int pos = 0;
-    char c = '\0';
+    int character = '\0';
 
     while(bytes > 0){
 
-        c = message[pos];
+        character = message[pos];
 
         pthread_mutex_lock(&print_lock);
-        if(c == MESSAGE_START){
+        if(character == MESSAGE_START){
             wprintw(chat_win, "\n");
             print_time(); //Print timestamp to chat window
         }else{
-            wprintw(chat_win, "%c", c);
+            wprintw(chat_win, "%c", character);
         }
+        pthread_mutex_unlock(&print_lock);
 
         wrefresh(chat_win); 
         wrefresh(text_win); //Ensure cursor is in text window
-        pthread_mutex_unlock(&print_lock);
         message++;
         bytes--; 
     }

@@ -25,7 +25,6 @@ int join_server(char *ip, unsigned int port, char *response){
     
     //Check for connection errors
     if(status){
-        check_status(status, "Error connecting to server");
         close_socket(network_socket);
         strcpy(response, "        -Error connecting to the chat server-");
         return status;
