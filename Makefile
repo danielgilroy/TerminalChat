@@ -1,21 +1,46 @@
+#Compilation flags
 CC = gcc
 CFLAGS = -I.
 DEBUG = -g -O0
-DEPS = client.h client_tcp.h
-OBJ = $(OBJDIR)/client.o $(OBJDIR)/client_tcp.o
-LIBS = -lpthread -lncurses
 
-VPATH = src
-OBJDIR = obj
+#Variables for charserver
+SRCDIRS = chat_server/src
+OBJDIRS = chat_server/obj
+SRCS = $(SRCDIRS)/server.c $(SRCDIRS)/server_utils.c $(SRCDIRS)/server_commands.c
+DEPS = $(SRCDIRS)/server.h $(SRCDIRS)/server_utils.h $(SRCDIRS)/server_commands.h $(SRCDIRS)/server_shared.h
+OBJS = $(OBJDIRS)/server.o $(OBJDIRS)/server_utils.o $(OBJDIRS)/server_commands.o
+LIBS = -lpthread -lsqlite3 -lsodium
 
-$(OBJDIR)/%.o: %.c $(DEPS)
-	$(CC) $(DEBUG) -c -o $@ $< $(CFLAGS)
+#Variables for chatclient
+SRCDIRC = chat_client/src
+OBJDIRC = chat_client/obj
+SRCC = $(SRCDIRC)/client.c $(SRCDIRC)/client_tcp.c
+DEPC = $(SRCDIRC)/client.h $(SRCDIRC)/client_tcp.h
+OBJC = $(OBJDIRC)/client.o $(OBJDIRC)/client_tcp.o
+LIBC = -lpthread -lncurses
 
-chatclient: $(OBJ)
-	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(CFLAGS) $(LIBS)
+.PHONY: all
+all: chatserver chatclient
+
+#Build object for chatserver
+$(OBJDIRS)/%.o: $(SRCDIRS)/%.c $(DEPS)
+	$(CC) $(DEBUG) -c -o $@ $<
+
+chatserver: $(OBJS)
+	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(LIBS)
+
+#Build object for chatclient
+$(OBJDIRC)/%.o: $(SRCDIRC)/%.c $(DEPC)
+	$(CC) $(DEBUG) -c -o $@ $<
+
+chatclient: $(OBJC)
+	$(CC) $(DEBUG) -Wall -pedantic -o $@ $^ $(LIBC)
 
 .PHONY: clean
-clean:
-	rm -r chatclient $(OBJDIR)
+clean: 
+	rm -r chatserver chatclient $(OBJDIRS) $(OBJDIRC)
 
-$(shell mkdir -p $(OBJDIR))
+#Create obj folders for client and server
+$(shell mkdir -p $(OBJDIRS))
+$(shell mkdir -p $(OBJDIRC))
+

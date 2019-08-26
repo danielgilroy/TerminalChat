@@ -1,5 +1,7 @@
 # Compiled
 chatclient
+chatserver
+users.db
 
 # Prerequisites
 *.d
