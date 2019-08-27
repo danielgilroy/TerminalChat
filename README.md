@@ -1,10 +1,10 @@
 
 # Description
 
-Linux terminal chat server and client that were programmed in C and make use of C socket programming (TCP protocol), pthreads, ncurses, libsodium, and SQLite3. The project compiles into two executables "chatserver" and "chatclient" which are used for hosting the chat server and connecting to the chat server respectively.
+Linux terminal chat server and client that were programmed in C and make use of C socket programming (TCP protocol), POSIX threads, ncurses, libsodium, and SQLite3. The project compiles into two executables ("chatserver" and "chatclient") which are used for hosting the chat server and connecting to the chat server respectively.
 
 - Multiple chat rooms, direct messaging, username registration, account types, spam filtering, and user kicking
-- Utilizes C socket programming (TCP protocol) to make connections and send/recveive messages
+- Utilizes C socket programming (TCP protocol) to make connections and send/receive messages
 - Handles multiple messages in one packet and incomplete message split up over multiple packets
 - Server-side storage of usernames and libsodium-hashed passwords within a local SQLite3 database  
 - Client application uses ncurses to display separate text areas for incoming chat text and outgoing user input
@@ -50,7 +50,7 @@ Download a [tarball of libsodium](https://download.libsodium.org/libsodium/relea
 
 # Building
 
-This application was developed for Linux and makes use of pthreads. Therefore, Windows is not natively supported due to the lack of pthreads on Windows operating systems. For use on Windows, you can use the Windows Subsystem for Linux (WSL) or Cygwin.
+This application was developed for Linux and makes use of POSIX threads. Therefore, Windows is not natively supported due to the lack of pthreads on Windows operating systems. For use on Windows, you can use the Windows Subsystem for Linux (WSL) or Cygwin.
 
 - Developed on Ubuntu v18.04.2 LTS
 
@@ -71,7 +71,7 @@ The chat server can be launched without any arguments, which will result in the 
     ./chatserver
     ./chatserver <port_number>
 
-The first time the chat server is launched, a main-admin acount with the username "*admin*" will be created. Simply enter the desired password twice and it will register the admin account in the local database. The local database is stored as a SQLite database named "*users.db*" and can be deleted at anytime to clear all the registered usernames and passwords.
+The first time the chat server is launched, a main-admin account with the username "*admin*" will be created. Simply enter the desired password twice and it will register the admin account in the local database. The local database is stored as a SQLite database named "*users.db*" and can be deleted at anytime to clear all the registered usernames and passwords.
 
 >## Chat Client
 
@@ -96,7 +96,7 @@ The following commands are entered in the chat client once connected to the chat
 
 >## clear
 
-The "*clear*" command is used to clear the scren to a blank state.
+The "*clear*" command is used to clear the screen to a blank state.
 
     /clear
 
