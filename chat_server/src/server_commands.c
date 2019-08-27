@@ -63,7 +63,7 @@ void whois_arg_cmd(int cmd_length, table_entry_t *user, char *client_msg, char *
 
 void who_cmd(int client_socket, char **who_messages){
 
-    for(int i = 1; i < MAX_ROOMS; i++){
+    for(int i = 1; i < MAX_ROOMS; i++){ //i = 1 to skip lobby
         //Rebuild who_messages strings if necessary
         rebuild_who_message(who_messages, i);
 
@@ -405,7 +405,7 @@ void kick_arg_cmd(int cmd_length, table_entry_t *user, table_entry_t **tmp, char
 
         target_room = target_user->room_id;
 
-        //Get tmp's hh.next for hash table itteration if removing tmp
+        //Get tmp's hh.next for hash table iteration if removing tmp
         if(*tmp == target_user){
             *tmp = (*tmp)->hh.next; //Avoids accessing removed user
         }

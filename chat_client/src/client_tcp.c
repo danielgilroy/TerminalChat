@@ -30,9 +30,9 @@ int join_server(char *ip, unsigned int port, char *response){
         return status;
     }
 
-    //Recieve welcome message from the server
+    //Receive welcome message from the server
     status = recv(network_socket, response, MESSAGE_SIZE, 0);
-    check_status(status, "Error recieving welcome message from server");
+    check_status(status, "Error receiving welcome message from server");
 
     return status;
 }
@@ -42,7 +42,7 @@ int receive_message(char *message, int message_length){
     int recv_status;
     recv_status = recv(network_socket, message, message_length, 0);
 
-    if(recv_status <= 0) {
+    if(recv_status <= 0){
         close_socket(network_socket);
     }
 

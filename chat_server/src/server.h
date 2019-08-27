@@ -19,7 +19,7 @@
 
 #define SPAM_MESSAGE_LIMIT 10 //Max messages within spam interval window
 #define SPAM_INTERVAL_WINDOW 10 //Interval window (in seconds) for max message limit
-#define SPAM_TIMEOUT_LENGTH 20 //Timeout period (in seconds) for detected spammer to wait
+#define SPAM_TIMEOUT_LENGTH 15 //Timeout period (in seconds) for detected spammer to wait
 
 void open_database();
 void create_admin();

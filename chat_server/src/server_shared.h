@@ -40,7 +40,7 @@
 #define PWHASH_MEMLIMIT crypto_pwhash_MEMLIMIT_INTERACTIVE //Use crypto_pwhash_MEMLIMIT_MODERATE for higher security
 
 typedef struct {
-    char id[USERNAME_SIZE];  /* key */
+    char id[USERNAME_SIZE];
     bool is_admin;
     int room_id;
     size_t index;
@@ -49,7 +49,7 @@ typedef struct {
     unsigned short port;
     char *message;
     size_t message_size;
-    UT_hash_handle hh;         /* makes this structure hashable */
+    UT_hash_handle hh;
 } table_entry_t;
 
 extern int socket_count;

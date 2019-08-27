@@ -85,10 +85,10 @@ ssize_t send_message_to_all(int room_id, const char *message, size_t message_len
     }
 
     ssize_t status = 0;
-    table_entry_t *s;
+    table_entry_t *user;
 
-    for(s = active_users[room_id]; s != NULL; s = s->hh.next) {
-        status = send_message(s->socket_fd, message, message_length);                     
+    for(user = active_users[room_id]; user != NULL; user = user->hh.next){
+        status = send_message(user->socket_fd, message, message_length);                     
     }                                                            
 
     return status;
@@ -135,14 +135,14 @@ void get_username_and_passwords(int cmd_length, char *client_message, char **new
 
 int get_admin_password(char *admin_password){
 
-    int c = 0;
+    int character = 0;
     int pos = 0;
 
-    while((c = getchar()) != '\n'){
-        if(pos > 0 && c == 0x7F){
+    while((character = getchar()) != '\n'){
+        if(pos > 0 && character == 0x7F){
              pos--;
-        }else if(pos < PASSWORD_SIZE_MAX - 1 && c >= 0x20 && c <= 0x7E){
-            admin_password[pos] = c;
+        }else if(pos < PASSWORD_SIZE_MAX - 1 && character >= 0x20 && character <= 0x7E){
+            admin_password[pos] = character;
             pos++;
         }
     }
@@ -182,10 +182,10 @@ bool is_password_invalid(const char *password, char *error_message){
         return true;
     }
 
-    //Check if too short
-    if(memchr(password, '\0', PASSWORD_SIZE_MIN)){
-        sprintf(error_message, SERVER_PREFIX "Password is too short (min %d characters)", PASSWORD_SIZE_MIN);
-        return true; 
+    //Check if blank
+    if(password[0] == '\0'){
+        sprintf(error_message, SERVER_PREFIX "Password is blank");
+        return true;   
     }
     //Check if too long
     if(!memchr(password, '\0', PASSWORD_SIZE_MAX)){
@@ -196,6 +196,11 @@ bool is_password_invalid(const char *password, char *error_message){
     if(strpbrk(password, " \t\n\v\f\r")){
         sprintf(error_message, SERVER_PREFIX "Passwords with spaces are restricted");
         return true;                            
+    }
+    //Check if too short
+    if(memchr(password, '\0', PASSWORD_SIZE_MIN)){
+        sprintf(error_message, SERVER_PREFIX "Password is too short (min %d characters)", PASSWORD_SIZE_MIN);
+        return true; 
     }
 
     return false;
@@ -337,9 +342,9 @@ void rebuild_who_message(char **who_messages, int room_id){
                 allocated_lengths[room_id] = who_message_size;
             } 
 
-            //Itterate through the hash table and append usernames
+            //Iterate through the hash table and append usernames
             table_entry_t *user;
-            for(user = active_users[room_id]; user != NULL; user = user->hh.next) {
+            for(user = active_users[room_id]; user != NULL; user = user->hh.next){
                 strncat(who_messages[room_id], user->id, who_message_size);
                 strncat(who_messages[room_id], " ", who_message_size);
             }
@@ -349,19 +354,19 @@ void rebuild_who_message(char **who_messages, int room_id){
 
 void remove_user(table_entry_t **user){
 
-    int i = (*user)->index;
+    int index = (*user)->index;
     
     //Clear spam timeout and message count so new users using the same spot aren't affected
     pthread_mutex_lock(&spam_lock);
-    spam_message_count[i] = 0;
-    spam_timeout[i] = 0;
+    spam_message_count[index] = 0;
+    spam_timeout[index] = 0;
     pthread_mutex_unlock(&spam_lock);
 
     //Close the client socket
     check_status(close((*user)->socket_fd), "Error closing client socket");
 
     //Set FD to ignore state, decrement socket count, and set who_message for rebuild
-    socket_fds[i].fd = -1;
+    socket_fds[index].fd = -1;
     socket_count--;
 
     //Remove user from active_user hash table
@@ -418,7 +423,7 @@ table_entry_t * change_username(table_entry_t **user, char *username){
     return *user;
 }
 
-void delete_user(table_entry_t **user) {
+void delete_user(table_entry_t **user){
     int room_id = (*user)->room_id;
     HASH_DEL(active_users[room_id], *user);
     free(*user);
@@ -444,11 +449,11 @@ int strncmp_case_insensitive(const char *a, const char *b, size_t n){
 bool string_contains(const char *string, const char *substring){
 
     const char *substring_ptr = substring;
-    int c = 0;
+    int character = 0;
 
     do{
-        c = (unsigned char) *string;
-        if(tolower(toupper(c)) == *substring_ptr){
+        character = (unsigned char) *string;
+        if(tolower(toupper(character)) == *substring_ptr){
             substring_ptr++;
         }else if(substring_ptr != substring){
             //Reset substring_ptr and test current string character again
@@ -485,12 +490,14 @@ int check_status(int status, char *error){
 }
 
 //Function used to clear passwords from memory
-void secure_zero(volatile void *s, size_t n){
-    if(s == NULL){return;}
-    volatile uint8_t *p = s; //Use volatile to prevent compiler optimization
+void secure_zero(volatile void *p, size_t n){
+    if(p == NULL){
+        return;
+    }
+    volatile uint8_t *ptr = p; //Use volatile to prevent compiler optimization
     while(n > 0){
-        *p = 0;
-        p++;
+        *ptr = 0;
+        ptr++;
         n--;
     }
 }
